@@ -1,0 +1,23 @@
+[project]
+name = "fundamental-agent"
+version = "0.1.0"
+description = "基本面研究Agent — 框架驱动 + 记忆进化"
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=0.40.0",
+    "pandas>=2.0",
+    "openpyxl>=3.1",
+    "toml>=0.10",
+    "eodhd>=1.0",
+    "akshare>=1.14",
+]
+
+[project.scripts]
+fa = "fa.cli:main"
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
