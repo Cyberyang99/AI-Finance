@@ -7,4 +7,7 @@ cache/
 /dist/
 *.egg-info/
 .venv/
-.venv/
+memory/agent.db
+memory/episodic/theses/
+memory/episodic/scans/
+memory/episodic/reviews/
