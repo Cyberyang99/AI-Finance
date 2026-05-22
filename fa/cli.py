@@ -1,16 +1,14 @@
-"""CLI 入口 — fa 命令.
+"""CLI 入口 — fa 命令."""
 
-用法:
-  fa scan "固态电池"                  # 板块横向扫描
-  fa scan "固态电池" -l 10            # 最多10只
-  fa scan "固态电池" -o ~/Desktop/扫描.xlsx  # 指定输出
-  fa deep 300750.SHE                  # 个股深度分析
-  fa review                           # 定期回顾 (默认90天)
-  fa review -d 180                    # 回顾180天前的
-  fa sectors                          # 列出已知板块
-  fa config                           # 显示配置
-  fa init                             # 初始化 (首次运行)
-"""
+# ── 必须在所有 import 之前执行，修复 macOS Python 3.14 SSL 证书问题 ──
+import os as _os
+# 系统可能设了 SSL_CERT_FILE 但指向不存在的路径（Homebrew Python 常见问题）
+# 直接无条件覆盖为 certifi 的证书包
+try:
+    import certifi as _certifi
+    _os.environ["SSL_CERT_FILE"] = _certifi.where()
+except ImportError:
+    pass
 
 import argparse
 import sys

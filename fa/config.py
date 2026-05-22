@@ -35,6 +35,13 @@ def load_env():
 
 load_env()
 
+# macOS Python 3.14 SSL 证书修复 — 无条件覆盖系统错误路径
+try:
+    import certifi
+    os.environ["SSL_CERT_FILE"] = certifi.where()
+except ImportError:
+    pass
+
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 EODHD_KEY = os.environ.get("EODHD_API_KEY", "")
 
