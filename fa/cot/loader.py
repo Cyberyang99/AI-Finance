@@ -1,0 +1,141 @@
+"""CoT 加载器 — 从 memory/knowledge/cot/ 读取所有思维链.
+
+每个文件结构（由 fa/ingest/cot_extractor.py 写入）:
+
+```
+---
+ticker: ...
+sector: ...
+source: <文件名>
+source_hash: <hash>
+created_at: YYYY-MM-DD
+cot_count: N
+---
+
+# CoT 提取自 ...
+
+## CoT 1 — <trigger>
+
+**信号强度**: 9/10
+
+**推理链**: 驱动 → ... → 股价表现
+```
+"""
+
+import re
+from datetime import date
+from pathlib import Path
+from typing import Optional
+
+from ..memory.store import PROJECT_DIR
+
+COT_DIR = PROJECT_DIR / "memory" / "knowledge" / "cot"
+
+
+def list_cot_files(sector: Optional[str] = None) -> list[Path]:
+    """列出所有 CoT 文件路径，可按 sector 过滤。"""
+    if not COT_DIR.exists():
+        return []
+    if sector:
+        sub = COT_DIR / sector
+        if sub.exists():
+            return sorted(sub.glob("*.md"))
+        return []
+    return sorted(COT_DIR.rglob("*.md"))
+
+
+def _parse_frontmatter(text: str) -> dict:
+    """解析 yaml frontmatter（手写，避免新依赖）。"""
+    if not text.startswith("---"):
+        return {}
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}
+    fm = {}
+    for line in parts[1].split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.match(r"^([\w_]+)\s*:\s*(.*)$", line)
+        if m:
+            fm[m.group(1)] = m.group(2).strip()
+    return fm
+
+
+def _parse_cot_body(body: str) -> list[dict]:
+    """从 markdown body 抽出每条 CoT。
+
+    匹配格式:
+      ## CoT N — <trigger>
+      **信号强度**: X/10
+      **推理链**: ...
+    """
+    out = []
+    # 用 lookahead 划分到下一个 ## CoT 或字符串末
+    blocks = re.split(r"(?=^## CoT \d+ — )", body, flags=re.MULTILINE)
+    for block in blocks:
+        block = block.strip()
+        if not block.startswith("## CoT"):
+            continue
+        # trigger
+        m_trig = re.match(r"^## CoT \d+ — (.+?)$", block.split("\n", 1)[0])
+        trigger = m_trig.group(1).strip() if m_trig else ""
+        # signal
+        m_sig = re.search(r"\*\*信号强度\*\*:\s*(\d+)\s*/\s*10", block)
+        signal = m_sig.group(1) if m_sig else "5"
+        # reasoning chain
+        m_cot = re.search(r"\*\*推理链\*\*:\s*(.+?)(?=\n##|\Z)", block, re.DOTALL)
+        cot_text = m_cot.group(1).strip() if m_cot else ""
+        if trigger and cot_text:
+            out.append({
+                "trigger": trigger,
+                "COT": cot_text,
+                "signal": signal,
+            })
+    return out
+
+
+def load_cots(sector: Optional[str] = None, ticker: Optional[str] = None,
+              min_signal: int = 0) -> list[dict]:
+    """加载所有 CoT，可按 sector / ticker / 最低信号强度过滤。
+
+    返回 list[{
+        "trigger": str,
+        "COT": str,
+        "signal": str (1-10),
+        "_source": filename,
+        "_sector": sector,
+        "_ticker": ticker (可空),
+        "_created_at": date string,
+        "_cot_id": <hash>_<index>,
+    }]
+    """
+    files = list_cot_files(sector)
+    all_cots = []
+    for fp in files:
+        try:
+            text = fp.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        fm = _parse_frontmatter(text)
+        if ticker and fm.get("ticker") and fm["ticker"] != ticker:
+            continue
+        # 解析 body
+        body = text.split("---", 2)[-1]
+        cots = _parse_cot_body(body)
+        for i, c in enumerate(cots, 1):
+            try:
+                sig_n = int(c["signal"])
+            except ValueError:
+                sig_n = 5
+            if sig_n < min_signal:
+                continue
+            all_cots.append({
+                **c,
+                "_source": fm.get("source", fp.name),
+                "_sector": fm.get("sector", ""),
+                "_ticker": fm.get("ticker", ""),
+                "_created_at": fm.get("created_at", ""),
+                "_cot_id": f"{fm.get('source_hash', fp.stem)}_{i}",
+            })
+    return all_cots

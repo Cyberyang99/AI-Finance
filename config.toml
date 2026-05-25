@@ -1,5 +1,5 @@
 [agent]
-model = "deepseek-v4-pro"
+model = "deepseek-v4-flash"
 max_tokens = 16384
 thinking = false
 temperature = 0.3

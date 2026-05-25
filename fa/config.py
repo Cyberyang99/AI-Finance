@@ -16,7 +16,7 @@ def load_config():
         if example.exists():
             print(f"[INIT] 首次运行，请从 config.toml.example 复制配置: cp {example} {cfg_path}")
         return {}
-    return toml.load(open(cfg_path))
+    return toml.load(open(cfg_path, encoding="utf-8"))
 
 
 def load_env():
@@ -28,7 +28,8 @@ def load_env():
     env_path = PROJECT_DIR / ".env"
     if not env_path.exists():
         return
-    for line in open(env_path):
+    # utf-8-sig 自动剥离 BOM (Windows PowerShell Set-Content -Encoding utf8 会写 BOM)
+    for line in open(env_path, encoding="utf-8-sig"):
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -48,22 +49,36 @@ except ImportError:
     pass
 
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-# ANTHROPIC_AUTH_TOKEN 用于 Bearer 认证（DeepSeek 等代理需要）
-ANTHROPIC_AUTH_TOKEN = os.environ.get("ANTHROPIC_AUTH_TOKEN", "") or ANTHROPIC_KEY
+# ANTHROPIC_AUTH_TOKEN: 仅当代理明确要求 Bearer (Authorization header) 时才使用
+ANTHROPIC_AUTH_TOKEN = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
 EODHD_KEY = os.environ.get("EODHD_API_KEY", "")
 # 自定义 base_url 支持（用于 DeepSeek 等兼容 Anthropic API 的代理）
+# DeepSeek: https://api.deepseek.com/anthropic
 ANTHROPIC_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "") or None
 
-# 当配置了 base_url（说明走代理），优先使用 auth_token 而非 api_key
-USE_AUTH_TOKEN = bool(ANTHROPIC_BASE_URL)
+# DeepSeek 官方文档：x-api-key Fully Supported → 默认走 api_key (x-api-key header)
+# 仅当显式设置 ANTHROPIC_USE_AUTH_TOKEN=1 且有 token 时才走 Bearer
+USE_AUTH_TOKEN = (
+    os.environ.get("ANTHROPIC_USE_AUTH_TOKEN", "").lower() in ("1", "true", "yes")
+    and bool(ANTHROPIC_AUTH_TOKEN)
+)
 
 if not ANTHROPIC_KEY and not ANTHROPIC_AUTH_TOKEN:
-    print("[WARN] ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN 未设置，Agent 需要它调用 LLM")
+    print("[WARN] ANTHROPIC_API_KEY 未设置，Agent 需要它调用 LLM")
 
 
 def make_anthropic_client():
-    """统一构造 Anthropic 客户端，自动处理 DeepSeek 等代理的认证差异。"""
+    """统一构造 Anthropic 客户端。
+
+    默认: api_key → x-api-key header (DeepSeek 和官方 Anthropic 都支持)。
+    设置 ANTHROPIC_USE_AUTH_TOKEN=1 时改走 Bearer (auth_token)。
+    """
     import anthropic
+    kwargs = {}
+    if ANTHROPIC_BASE_URL:
+        kwargs["base_url"] = ANTHROPIC_BASE_URL
     if USE_AUTH_TOKEN:
-        return anthropic.Anthropic(auth_token=ANTHROPIC_AUTH_TOKEN, base_url=ANTHROPIC_BASE_URL)
-    return anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+        kwargs["auth_token"] = ANTHROPIC_AUTH_TOKEN
+    else:
+        kwargs["api_key"] = ANTHROPIC_KEY or ANTHROPIC_AUTH_TOKEN
+    return anthropic.Anthropic(**kwargs)

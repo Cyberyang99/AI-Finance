@@ -126,6 +126,21 @@ class MemoryStore:
                     created_at TEXT DEFAULT (datetime('now'))
                 );
 
+                -- P0: 外部文档摄入记录（去重 + 溯源）
+                CREATE TABLE IF NOT EXISTS ingested_docs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_path TEXT NOT NULL,         -- 原文件绝对路径
+                    filename TEXT NOT NULL,
+                    file_type TEXT,                    -- pdf / docx / xlsx / pptx
+                    file_hash TEXT NOT NULL UNIQUE,    -- md5 前 16 位，去重
+                    ticker TEXT,                       -- 可空，绑定个股
+                    sector TEXT,                       -- 可空，绑定板块
+                    pages INTEGER,                     -- 页/sheet/slide 数
+                    cot_count INTEGER DEFAULT 0,       -- 提炼了多少条 CoT
+                    cot_file TEXT,                     -- CoT md 文件相对路径
+                    ingested_at TEXT DEFAULT (datetime('now'))
+                );
+
                 -- 索引
                 CREATE INDEX IF NOT EXISTS idx_theses_ticker ON theses(ticker);
                 CREATE INDEX IF NOT EXISTS idx_theses_status ON theses(status);
@@ -134,6 +149,9 @@ class MemoryStore:
                 CREATE INDEX IF NOT EXISTS idx_sector_name ON sector_knowledge(sector);
                 CREATE INDEX IF NOT EXISTS idx_perf_thesis ON performance(thesis_id);
                 CREATE INDEX IF NOT EXISTS idx_perf_ticker ON performance(ticker);
+                CREATE INDEX IF NOT EXISTS idx_ingest_ticker ON ingested_docs(ticker);
+                CREATE INDEX IF NOT EXISTS idx_ingest_sector ON ingested_docs(sector);
+                CREATE INDEX IF NOT EXISTS idx_ingest_hash ON ingested_docs(file_hash);
             """)
             self._migrate()
 
@@ -369,6 +387,49 @@ class MemoryStore:
             return [dict(r) for r in c.execute(
                 "SELECT sector, last_scan_at FROM sector_knowledge ORDER BY sector"
             ).fetchall()]
+
+    # ── P0: 外部文档摄入记录 ──
+
+    def save_ingested_doc(self, source_path: str, filename: str, file_type: str,
+                          file_hash: str, ticker: str = None, sector: str = None,
+                          pages: int = 0, cot_count: int = 0, cot_file: str = None) -> int:
+        """保存摄入记录。同 file_hash 已存在则更新，返回 id。"""
+        with self._conn() as c:
+            row = c.execute("SELECT id FROM ingested_docs WHERE file_hash=?",
+                            (file_hash,)).fetchone()
+            if row:
+                c.execute("""
+                    UPDATE ingested_docs SET ticker=?, sector=?, cot_count=?, cot_file=?,
+                    ingested_at=datetime('now') WHERE id=?
+                """, (ticker, sector, cot_count, cot_file, row["id"]))
+                return row["id"]
+            cur = c.execute("""
+                INSERT INTO ingested_docs (source_path, filename, file_type, file_hash,
+                ticker, sector, pages, cot_count, cot_file)
+                VALUES (?,?,?,?,?,?,?,?,?)
+            """, (source_path, filename, file_type, file_hash,
+                  ticker, sector, pages, cot_count, cot_file))
+            return cur.lastrowid
+
+    def has_ingested(self, file_hash: str) -> bool:
+        with self._conn() as c:
+            return c.execute("SELECT 1 FROM ingested_docs WHERE file_hash=?",
+                             (file_hash,)).fetchone() is not None
+
+    def list_ingested(self, ticker: str = None, sector: str = None,
+                      limit: int = 50) -> list:
+        sql = "SELECT * FROM ingested_docs WHERE 1=1"
+        args = []
+        if ticker:
+            sql += " AND ticker=?"
+            args.append(ticker)
+        if sector:
+            sql += " AND sector=?"
+            args.append(sector)
+        sql += " ORDER BY ingested_at DESC LIMIT ?"
+        args.append(limit)
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(sql, args).fetchall()]
 
     # ── 模式操作 ──
 

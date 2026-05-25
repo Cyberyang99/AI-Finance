@@ -11,3 +11,16 @@ memory/agent.db
 memory/episodic/theses/
 memory/episodic/scans/
 memory/episodic/reviews/
+memory/cache/
+memory/benchmarks/
+memory/raw/
+
+# 个人论点和外部资料摄入（私有数据，不入 git）
+memory/theses/user/
+memory/knowledge/cot/
+
+# 调试临时文件
+.pdf*.txt
+.smoke_test*.py
+.deepseek-doc.html
+.pdf_extract.py

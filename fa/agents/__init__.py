@@ -8,3 +8,7 @@
 
 from .critic import CriticAgent
 from .recall import RecallAgent
+from .reflector import ReflectorAgent
+from .conflict import ConflictResolver
+
+__all__ = ["CriticAgent", "RecallAgent", "ReflectorAgent", "ConflictResolver"]

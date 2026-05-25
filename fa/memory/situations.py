@@ -312,6 +312,66 @@ class SituationStore:
             self.rebuild_index()
         return self.index_path.read_text(encoding="utf-8")
 
+    # ── 行业门限硬过滤 (PDF 2 §2.2.4) ──
+
+    @staticmethod
+    def sector_match(note: dict, sector: Optional[str]) -> bool:
+        """笔记是否适用于当前股票行业。
+
+        - sector 为 None / 'all' / 空 → 不过滤，全部通过
+        - sector_scope = ['all'] → 通过
+        - sector 在 sector_excluded → 拒绝
+        - sector 在 sector_scope → 通过
+        - 其他情况（scope 非 all 且 sector 不在 scope）→ 拒绝
+        """
+        if not sector or sector == "all":
+            return True
+        scope = note.get("sector_scope", ["all"])
+        excluded = note.get("sector_excluded", [])
+        if not isinstance(scope, list):
+            scope = [scope]
+        if not isinstance(excluded, list):
+            excluded = [excluded]
+
+        if sector in excluded:
+            return False
+        if "all" in scope:
+            return True
+        return sector in scope
+
+    def list_notes_for_sector(self, sector: Optional[str],
+                              include_archived: bool = False) -> list[dict]:
+        """列出适用于指定行业的笔记（应用 sector_scope / sector_excluded 硬过滤）。"""
+        all_notes = self.list_notes(include_archived=include_archived)
+        if not sector or sector == "all":
+            return all_notes
+        return [n for n in all_notes if self.sector_match(n, sector)]
+
+    def build_index_for_sector(self, sector: Optional[str]) -> str:
+        """为指定行业构建一个临时索引文本（不写盘）。
+
+        Recall 时传给 LLM 的索引在硬过滤后，候选池更准、token 更省。
+        """
+        notes = self.list_notes_for_sector(sector)
+        if not notes:
+            return f"# 情境记忆索引（行业 {sector} 适用）\n\n（暂无笔记）\n"
+
+        lines = [
+            f"# 情境记忆索引（行业 {sector} 适用）",
+            f"> 已按 sector_scope / sector_excluded 硬过滤，共 {len(notes)} 条候选。",
+            "",
+            "## 召回检索区",
+            "",
+        ]
+        for n in notes:
+            lines.append(f"### `{n['id']}`")
+            lines.append(f"- 情境: {n.get('situation', '')}")
+            lines.append(f"- 适用: {', '.join(n.get('sector_scope', ['all']))}")
+            lines.append(f"- 置信: {n.get('confidence', 0.5)}")
+            lines.append(f"- 检索文本: {n.get('retrieval_text', n.get('situation', ''))}")
+            lines.append("")
+        return "\n".join(lines)
+
     # ── 辅助 ──
 
     def get_full_notes(self, note_ids: list[str]) -> list[dict]:

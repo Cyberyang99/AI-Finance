@@ -16,7 +16,7 @@ import anthropic
 from .config import ANTHROPIC_KEY, ANTHROPIC_BASE_URL, load_config, make_anthropic_client
 from .memory import MemoryStore, PredictionRegistry, EvolutionEngine, PerformanceTracker, SituationStore
 from .memory.store import PROJECT_DIR
-from .agents import CriticAgent, RecallAgent
+from .agents import CriticAgent, RecallAgent, ReflectorAgent, ConflictResolver
 from .tools.data import fetch_fundamentals, fetch_batch
 from .tools.sector import find_sector_peers, list_sectors
 from .framework import get_framework_prompt
@@ -29,6 +29,8 @@ evolution = EvolutionEngine(store)
 critic = CriticAgent()
 situations = SituationStore()
 recall = RecallAgent()
+reflector = ReflectorAgent()
+conflict_resolver = ConflictResolver()
 
 FRAMEWORK_DIR = PROJECT_DIR / "memory" / "framework"
 
@@ -212,28 +214,54 @@ def _build_system_prompt(mode: str, sector: str = None, ticker: str = None,
 
 
 def _format_situational_memory(notes: list = None) -> str:
-    """把召回的情境笔记格式化成 system prompt 段落。"""
+    """把召回的情境笔记格式化成 system prompt 段落。
+
+    用户论点 (id 以 user_ 开头) 单独高亮在最前面，权重信号给到模型。
+    """
     if not notes:
         return "## 情境记忆\n（本次未召回任何历史经验笔记。如有类似案例，请优先参考自身经验。）"
 
-    parts = [
-        "## 情境记忆 — 历史经验笔记",
-        f"> 系统召回了 {len(notes)} 条与当前任务相关的历史经验笔记。",
-        f"> 这些是过往论点的复盘沉淀，请结合当前情境判断是否适用。",
-        "",
-    ]
-    for i, n in enumerate(notes, 1):
+    user_notes = [n for n in notes if str(n.get("id", "")).startswith("user_")]
+    other_notes = [n for n in notes if not str(n.get("id", "")).startswith("user_")]
+
+    parts = []
+    if user_notes:
         parts.extend([
-            f"### 笔记 {i}: {n.get('situation', '?')}",
-            f"- 适用行业: {', '.join(n.get('sector_scope', ['all']))}",
-            f"- 置信度: {n.get('confidence', 0.5)}",
-            f"- 召回理由: {n.get('_recall_reason', '相关')}",
-            "",
-            n.get("body", "").strip(),
-            "",
-            "---",
+            "## 用户论点（最高优先级，必须重点对照）",
+            f"> 以下 {len(user_notes)} 条是用户亲自录入的对该标的的判断和思考。",
+            f"> 你的分析结论必须明确与用户论点进行比对：如果同意，说明在哪几点；",
+            f"> 如果有分歧，必须解释具体在哪里、为什么。**绝不允许忽略用户论点**。",
             "",
         ])
+        for i, n in enumerate(user_notes, 1):
+            parts.extend([
+                f"### 用户论点 {i}: {n.get('situation', '?')}",
+                "",
+                n.get("body", "").strip(),
+                "",
+                "---",
+                "",
+            ])
+
+    if other_notes:
+        parts.extend([
+            "## 情境记忆 — 历史经验笔记",
+            f"> 系统召回了 {len(other_notes)} 条与当前任务相关的历史经验笔记。",
+            f"> 这些是过往论点的复盘沉淀，请结合当前情境判断是否适用。",
+            "",
+        ])
+        for i, n in enumerate(other_notes, 1):
+            parts.extend([
+                f"### 笔记 {i}: {n.get('situation', '?')}",
+                f"- 适用行业: {', '.join(n.get('sector_scope', ['all']))}",
+                f"- 置信度: {n.get('confidence', 0.5)}",
+                f"- 召回理由: {n.get('_recall_reason', '相关')}",
+                "",
+                n.get("body", "").strip(),
+                "",
+                "---",
+                "",
+            ])
     return "\n".join(parts)
 
 
@@ -472,7 +500,7 @@ def do_scan(topic: str, tickers: list[str] = None, output: str = None):
 
 
 def _recall_for_scan(topic: str, tickers: list[str] = None) -> list:
-    """为 scan 分析召回相关情境笔记。失败不阻塞。"""
+    """为 scan 分析召回相关情境笔记。失败不阻塞。P1: 行业硬过滤。"""
     try:
         highlights = f"板块: {topic}, 成分股: {len(tickers or [])} 只"
         ctx = {
@@ -482,11 +510,14 @@ def _recall_for_scan(topic: str, tickers: list[str] = None) -> list:
             "task": "scan",
             "highlights": highlights,
         }
-        index = situations.read_index()
+        # P1: 行业门限硬过滤
+        index = situations.build_index_for_sector(topic)
+        if "暂无笔记" in index:
+            return []
         selected = recall.recall(ctx, index, top_k=3)
         if selected:
             note_ids = [s["id"] for s in selected]
-            print(f"  [RECALL] 召回 {len(note_ids)} 条情境笔记: {note_ids}")
+            print(f"  [RECALL] 召回 {len(note_ids)} 条情境笔记 (板块 {topic}): {note_ids}")
             return situations.get_full_notes(note_ids)
     except Exception as e:
         print(f"  [RECALL] 跳过: {e}")
@@ -522,8 +553,34 @@ Ticker: {ticker}
 
 
 def _recall_for_deep(ticker: str, data: dict) -> list:
-    """为 deep 分析召回相关情境笔记。失败不阻塞。"""
+    """为 deep 分析召回相关情境笔记 + 用户论点。失败不阻塞。
+
+    P0: 用户论点优先 — 直接取该 ticker 的所有 user note，append 在情境笔记前面。
+    用户输入比 agent 自己沉淀的笔记权重高（PDF2 设计：和你思考逻辑对齐）。
+    """
+    out = []
+
+    # 1. 用户论点优先（无 LLM 调用，按 ticker 直接拉）
     try:
+        from .ingest.user_note import load_user_notes
+        user_notes = load_user_notes(ticker)
+        for un in user_notes[:3]:  # 最多 3 条最新的
+            out.append({
+                "id": f"user_{un['created_at']}",
+                "situation": f"用户论点 ({un['created_at']})",
+                "sector_scope": [data.get("sector", "all")],
+                "confidence": 1.0,
+                "_recall_reason": "用户亲自录入的论点，权重最高，必须重点对照",
+                "body": un["content"],
+            })
+        if user_notes:
+            print(f"  [RECALL] 用户论点 {len(user_notes)} 条 (注入前 {min(3,len(user_notes))} 条)")
+    except Exception as e:
+        print(f"  [RECALL] 用户论点跳过: {e}")
+
+    # 2. LLM 召回情境笔记（先按行业硬过滤）
+    try:
+        sector = data.get("sector", "未知")
         highlights = (
             f"毛利率: {data.get('gross_margin')}%, ROE: {data.get('roe')}%, "
             f"营收增速: {data.get('revenue_cagr_3y')}%, PE: {data.get('pe')}"
@@ -531,22 +588,135 @@ def _recall_for_deep(ticker: str, data: dict) -> list:
         ctx = {
             "ticker": ticker,
             "name": data.get("name", ""),
-            "sector": data.get("sector", "未知"),
+            "sector": sector,
             "task": "deep",
             "highlights": highlights,
         }
-        index = situations.read_index()
-        selected = recall.recall(ctx, index, top_k=5)
-        if selected:
-            note_ids = [s["id"] for s in selected]
-            print(f"  [RECALL] 召回 {len(note_ids)} 条情境笔记: {note_ids}")
-            return situations.get_full_notes(note_ids)
+        # P1: 行业门限硬过滤 — 缩小候选池后再让 LLM 选 Top-K
+        index = situations.build_index_for_sector(sector)
+        if "暂无笔记" in index:
+            print(f"  [RECALL] 行业 {sector} 无适用笔记")
+        else:
+            selected = recall.recall(ctx, index, top_k=5)
+            if selected:
+                note_ids = [s["id"] for s in selected]
+                print(f"  [RECALL] 情境笔记召回 {len(note_ids)} 条 (行业过滤后): {note_ids}")
+                full = situations.get_full_notes(note_ids)
+                out.extend(full)
     except Exception as e:
-        print(f"  [RECALL] 跳过: {e}")
-    return []
+        print(f"  [RECALL] 情境笔记跳过: {e}")
+
+    # 3. P2: 注入相关 CoT 作为辅助逻辑参考（无 LLM 调用，纯磁盘读）
+    try:
+        from .cot.loader import load_cots
+        sector = data.get("sector", "")
+        # 按 ticker 自己的 sector 找 CoT，没有就全库高信号 fallback
+        cots = load_cots(sector=sector, min_signal=8) if sector else []
+        if not cots:
+            cots = load_cots(min_signal=9)
+        if cots:
+            # 取信号最高的 5 条作为参考
+            cots = sorted(cots, key=lambda c: -int(c.get("signal", "5")))[:5]
+            body_lines = ["以下是从历史研报中提炼的高信号思维链，供你做基本面分析时参考："]
+            for c in cots:
+                body_lines.append(
+                    f"- [{c['signal']}/10] **{c['trigger']}**: {c['COT']}"
+                )
+            out.append({
+                "id": "cot_reference",
+                "situation": "研报思维链参考（不必逐条对照，作为分析的逻辑库）",
+                "sector_scope": [sector or "all"],
+                "confidence": 0.7,
+                "_recall_reason": "研报里高信号 (signal≥8) 的推理链摘要",
+                "body": "\n".join(body_lines),
+            })
+            print(f"  [RECALL] 注入 {len(cots)} 条 CoT 作为分析参考")
+    except Exception as e:
+        print(f"  [RECALL] CoT 注入跳过: {e}")
+
+    return out
 
 
-def do_review(days: int = 90, with_critic: bool = True):
+def _apply_reflection(candidates: list[dict], ticker: str, excess: float = None) -> dict:
+    """对 Reflector 产出的候选笔记，逐条用 ConflictResolver 决策并落盘。
+
+    返回统计 {"add": N, "skip": N, "replace": N, "branch": N}.
+    """
+    stats = {"add": 0, "skip": 0, "replace": 0, "branch": 0}
+    if not candidates:
+        return stats
+
+    existing = situations.list_notes()
+    for cand in candidates:
+        decision = conflict_resolver.resolve(cand, existing)
+        op = decision["decision"]
+        tid = decision.get("target_id")
+        reason = decision.get("reason", "")
+
+        print(f"  [Reflect] 候选笔记: {cand['situation'][:50]}")
+        print(f"    决策: {op} | target={tid or '-'} | 理由: {reason[:120]}")
+
+        if op == "skip":
+            stats["skip"] += 1
+            continue
+
+        if op == "replace" and tid:
+            # 旧笔记归档，新笔记用新 id
+            situations.archive(tid)
+            note = _make_note_from_candidate(cand, ticker, excess)
+            situations.save(note)
+            stats["replace"] += 1
+            existing = situations.list_notes()  # 刷新池供后续候选用
+
+        elif op == "branch" and tid:
+            # 在旧笔记 body 末尾追加例外分支
+            old = situations.load(tid)
+            if old:
+                body = old.get("body", "")
+                branch_text = (
+                    f"\n\n## 例外分支 (新增 {_today()})\n\n"
+                    f"### 触发情境\n{cand['situation']}\n\n"
+                    f"### 经验\n{cand['body']}\n"
+                )
+                old["body"] = body + branch_text
+                old["refined_count"] = old.get("refined_count", 0) + 1
+                # 同步扩展 sector_scope 如需
+                situations.save(old)
+                stats["branch"] += 1
+
+        else:  # add (默认)
+            note = _make_note_from_candidate(cand, ticker, excess)
+            situations.save(note)
+            stats["add"] += 1
+            existing = situations.list_notes()
+
+    return stats
+
+
+def _today() -> str:
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _make_note_from_candidate(cand: dict, source_ticker: str, excess_return: float = None) -> dict:
+    """把 Reflector 输出的候选笔记转换成可保存的 note dict。"""
+    return {
+        "situation": cand.get("situation", ""),
+        "retrieval_text": cand.get("retrieval_text", cand.get("situation", "")),
+        "body": cand.get("body", ""),
+        "sector_scope": cand.get("sector_scope") or ["all"],
+        "sector_excluded": cand.get("sector_excluded") or [],
+        "confidence": float(cand.get("confidence", 0.6)),
+        "source_thesis": source_ticker,
+        "source_excess_return": excess_return,
+        "validated_on": [source_ticker],
+        "refined_count": 0,
+        "absorbed": False,
+        "archived": False,
+    }
+
+
+def do_review(days: int = 90, with_critic: bool = True, with_reflector: bool = True):
     due = store.list_due_reviews(days)
     if not due:
         print("[REVIEW] 无需回顾")
@@ -629,6 +799,34 @@ def do_review(days: int = 90, with_critic: bool = True):
                     print(f"  [评审]\n  {critic_out['critique']}")
             else:
                 print(f"  [Critic] {critic_out['critique']}")
+
+        # 4.5 Reflector — 重大失败/成功才触发，产出候选笔记 → ConflictResolver 落盘
+        if with_reflector and perf and critic_out:
+            should, why = reflector.should_reflect(perf, critic_out)
+            if should:
+                print(f"  [Reflector] 触发 ({why})...")
+                reflection = reflector.reflect(thesis, perf, results, critic_out,
+                                               current_fundamentals=data)
+                diag = reflection.get("diagnosis", {})
+                cands = reflection.get("candidate_notes", [])
+
+                if reflection.get("error"):
+                    print(f"  [Reflector] {reflection['error']}")
+                else:
+                    if diag.get("root_cause"):
+                        print(f"  [诊断] root_cause: {diag['root_cause'][:150]}")
+                        print(f"  [诊断] pattern_type: {diag.get('pattern_type', '?')}")
+                    if cands:
+                        print(f"  [Reflector] 产出 {len(cands)} 条候选笔记，进入冲突仲裁...")
+                        stats = _apply_reflection(cands, ticker,
+                                                  excess=perf.get("excess_return"))
+                        print(f"  [Reflector] 笔记落盘: "
+                              f"add={stats['add']} skip={stats['skip']} "
+                              f"replace={stats['replace']} branch={stats['branch']}")
+                    else:
+                        print(f"  [Reflector] 无可泛化经验，未产出笔记")
+            else:
+                print(f"  [Reflector] 跳过 ({why})")
 
         # 5. 保存回顾记录
         score_parts = [f"主观 {subjective}"]

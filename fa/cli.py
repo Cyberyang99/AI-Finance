@@ -25,6 +25,14 @@ import argparse
 import sys
 from pathlib import Path
 
+# ── Windows 后台运行时 stdout/stderr 默认 GBK，强制 utf-8 ──
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
 from .config import load_config
 from .tools.sector import find_sector_peers, list_sectors
 from .memory import MemoryStore, PerformanceTracker
@@ -53,6 +61,8 @@ def main():
     pr = sub.add_parser("review", help="定期回顾")
     pr.add_argument("-d", "--days", type=int, default=90)
     pr.add_argument("--no-critic", action="store_true", help="跳过 Critic LLM 评审（省 API 费）")
+    pr.add_argument("--no-reflector", action="store_true",
+                    help="跳过 Reflector 反思（不沉淀新情境笔记）")
 
     # evolve
     pe = sub.add_parser("evolve", help="进化分析")
@@ -62,6 +72,51 @@ def main():
     pc = sub.add_parser("critique", help="查看某只股票最近一次 Critic 评审")
     pc.add_argument("ticker", help="股票代码")
     pc.add_argument("--rerun", action="store_true", help="重新触发 Critic 评审（消耗 API）")
+
+    # reflect (P1) — 手动触发反思
+    prf = sub.add_parser("reflect", help="对某只股票最近一次回顾跑 Reflector 反思（产出情境笔记）")
+    prf.add_argument("ticker", help="股票代码")
+    prf.add_argument("--force", action="store_true",
+                     help="强制反思，绕过 should_reflect 阈值检查")
+
+    # ingest (P0)
+    pi = sub.add_parser("ingest", help="摄入外部文档 (PDF/DOCX/XLSX/PPTX) → 提炼 CoT")
+    pi.add_argument("path", help="文件路径，或 --batch 时为目录")
+    pi.add_argument("--ticker", help="绑定个股 (例: 2513.HK)")
+    pi.add_argument("--sector", help="绑定板块 (例: AI/半导体)")
+    pi.add_argument("--batch", action="store_true", help="批量摄入目录下所有支持格式的文件")
+    pi.add_argument("--no-cot", action="store_true", help="只抽文，不调用 LLM 提炼 CoT")
+
+    # note (P0)
+    pn = sub.add_parser("note", help="录入用户论点 (4 维度: 论点/护城河/反证/时间+仓位)")
+    pn.add_argument("ticker", help="股票代码")
+    pn.add_argument("-m", "--message", help="一句话快录")
+    pn.add_argument("-f", "--file", help="从 md 文件导入")
+    pn.add_argument("--sector", help="所属板块（可选，辅助召回过滤）")
+
+    # notes
+    pln = sub.add_parser("notes", help="列出用户论点")
+    pln.add_argument("ticker", nargs="?", help="可选：只列某只票")
+
+    # cot (P2) — CoT 选股工具
+    pcot = sub.add_parser("cot", help="CoT 工具：list / score / vote")
+    cotsub = pcot.add_subparsers(dest="cot_cmd")
+
+    pcot_l = cotsub.add_parser("list", help="列出已有 CoT")
+    pcot_l.add_argument("--sector", help="按板块过滤")
+    pcot_l.add_argument("--min-signal", type=int, default=0, help="只列信号 >= N 的 CoT")
+
+    pcot_s = cotsub.add_parser("score", help="用相关 CoT 对单只股票打分")
+    pcot_s.add_argument("ticker", help="股票代码")
+    pcot_s.add_argument("--sector", help="覆盖股票自身的 sector，强制用某板块的 CoT")
+    pcot_s.add_argument("--min-signal", type=int, default=7, help="只用信号 >= N 的 CoT (默认 7)")
+    pcot_s.add_argument("--limit", type=int, default=15, help="最多用多少条 CoT (默认 15，省 API)")
+
+    pcot_v = cotsub.add_parser("vote", help="多股票联合投票 → 出持仓清单")
+    pcot_v.add_argument("tickers", nargs="+", help="股票代码列表")
+    pcot_v.add_argument("--sector", help="用哪个板块的 CoT 投票")
+    pcot_v.add_argument("--min-signal", type=int, default=7)
+    pcot_v.add_argument("--min-votes", type=int, default=3, help="进入持仓的最低票数")
 
     # dashboard
     sub.add_parser("dash", help="仪表盘")
@@ -90,6 +145,16 @@ def main():
         _cmd_evolve(args)
     elif args.cmd == "critique":
         _cmd_critique(args)
+    elif args.cmd == "reflect":
+        _cmd_reflect(args)
+    elif args.cmd == "ingest":
+        _cmd_ingest(args)
+    elif args.cmd == "note":
+        _cmd_note(args)
+    elif args.cmd == "notes":
+        _cmd_notes(args)
+    elif args.cmd == "cot":
+        _cmd_cot(args)
     elif args.cmd == "dash":
         _cmd_dash()
     elif args.cmd == "sectors":
@@ -123,7 +188,8 @@ def _cmd_deep(args):
 
 def _cmd_review(args):
     from .agent import do_review
-    do_review(args.days, with_critic=not args.no_critic)
+    do_review(args.days, with_critic=not args.no_critic,
+              with_reflector=not args.no_reflector)
 
 
 def _cmd_evolve(args):
@@ -209,6 +275,312 @@ def _render_critique(ticker: str, perf: dict, critic_out: dict):
             print(f"    - {h}")
     if critic_out.get("critique"):
         print(f"\n  完整评审:\n  {critic_out['critique']}")
+
+
+def _cmd_reflect(args):
+    """对某只股票最近一次回顾跑 Reflector，独立于 fa review."""
+    import json as _json
+    from .agent import (reflector, performance, store as _store, situations,
+                        _apply_reflection)
+    from .tools.data import fetch_fundamentals
+
+    ticker = args.ticker
+    thesis = _store.get_thesis(ticker)
+    if not thesis:
+        print(f"[REFLECT] {ticker} 无活跃论点")
+        return
+
+    # 拉最近一次 performance 记录
+    history = performance.get_history(ticker)
+    if not history:
+        print(f"[REFLECT] {ticker} 无 performance 记录，先跑 fa review")
+        return
+    latest = history[0]
+    perf = dict(latest)
+
+    # critic_out 从 latest 重建
+    critic_out = {
+        "critic_score": latest.get("critic_score"),
+        "raw_llm_score": latest.get("raw_llm_score"),
+        "final_score": latest.get("final_score"),
+        "what_worked": latest.get("what_worked") or "",
+        "what_failed": latest.get("what_failed") or "",
+        "improvement_hints": _json.loads(latest.get("improvement_hints") or "[]"),
+        "critique": latest.get("critique") or "",
+    }
+
+    if not args.force:
+        should, why = reflector.should_reflect(perf, critic_out)
+        if not should:
+            print(f"[REFLECT] 跳过 ({why})。用 --force 强制反思")
+            return
+
+    # 重新拉 prediction_results
+    reviews = _store.get_reviews(ticker)
+    pred_results = []
+    if reviews:
+        try:
+            pred_results = _json.loads(reviews[0].get("prediction_results") or "[]")
+        except Exception:
+            pred_results = []
+
+    data = fetch_fundamentals(ticker, with_benchmarks=False)
+
+    print(f"[REFLECT] 调用 Reflector LLM... ({ticker})")
+    reflection = reflector.reflect(thesis, perf, pred_results, critic_out,
+                                   current_fundamentals=data)
+    diag = reflection.get("diagnosis", {})
+    cands = reflection.get("candidate_notes", [])
+
+    if reflection.get("error"):
+        print(f"[REFLECT] {reflection['error']}")
+        return
+
+    if diag.get("root_cause"):
+        print(f"\n=== {ticker} Reflector 诊断 ===")
+        print(f"  root_cause:   {diag['root_cause']}")
+        print(f"  pattern_type: {diag.get('pattern_type', '?')}")
+        if diag.get("generalization_reason"):
+            print(f"  泛化说明:     {diag['generalization_reason']}")
+
+    if not cands:
+        print(f"\n[REFLECT] 无可泛化经验，未产出笔记")
+        return
+
+    print(f"\n[REFLECT] 产出 {len(cands)} 条候选笔记，进入冲突仲裁...")
+    stats = _apply_reflection(cands, ticker, excess=perf.get("excess_return"))
+    print(f"[REFLECT] 笔记落盘: add={stats['add']} skip={stats['skip']} "
+          f"replace={stats['replace']} branch={stats['branch']}")
+
+
+def _cmd_ingest(args):
+    """摄入外部文档 → 抽文 → (可选) LLM 提炼 CoT → 入库."""
+    from pathlib import Path
+    from .ingest import ingest_file, SUPPORTED_EXT, extract_cot
+    from .ingest.cot_extractor import save_cot_file
+
+    target = Path(args.path).expanduser().resolve()
+
+    if args.batch:
+        if not target.is_dir():
+            print(f"[INGEST] --batch 要求目录，得到文件: {target}")
+            return
+        files = sorted([p for p in target.rglob("*") if p.suffix.lower() in SUPPORTED_EXT])
+        print(f"[INGEST] 扫到 {len(files)} 个文件: {target}")
+    else:
+        if not target.exists():
+            print(f"[INGEST] 文件不存在: {target}")
+            return
+        files = [target]
+
+    for f in files:
+        _ingest_one(f, args.ticker, args.sector, with_cot=not args.no_cot)
+
+
+def _ingest_one(fpath, ticker, sector, with_cot=True):
+    """摄入单文件。"""
+    from .ingest import ingest_file
+    from .ingest.cot_extractor import extract_cot, save_cot_file
+
+    print(f"\n[INGEST] {fpath.name}")
+    try:
+        doc = ingest_file(fpath)
+    except Exception as e:
+        print(f"  ✗ 抽文失败: {e}")
+        return
+
+    print(f"  ✓ 抽文成功: {len(doc['text'])} 字 / {doc['pages']} 页 / hash={doc['hash']}")
+
+    # 去重逻辑：已有 CoT 才跳过；之前 --no-cot 进过的允许补 CoT
+    existing = [r for r in store.list_ingested(limit=10000) if r["file_hash"] == doc["hash"]]
+    if existing and existing[0].get("cot_count", 0) > 0 and with_cot:
+        print(f"  ⚠ 已摄入并提炼过 {existing[0]['cot_count']} 条 CoT，跳过")
+        return
+
+    cot_count = 0
+    cot_file_rel = None
+    if with_cot:
+        print(f"  [LLM] 提炼 CoT 中...")
+        cots = extract_cot(doc["text"])
+        cot_count = len(cots)
+        if cot_count > 0:
+            cot_path = save_cot_file(cots, ticker, sector, doc["filename"], doc["hash"])
+            cot_file_rel = str(cot_path.relative_to(cot_path.parents[3]))  # AI-Finance/memory/...
+            print(f"  ✓ 提炼 {cot_count} 条 CoT → {cot_file_rel}")
+            # 展示前 3 条
+            for i, c in enumerate(cots[:3], 1):
+                print(f"    {i}. [{c['signal']}/10] {c['trigger']}")
+            if cot_count > 3:
+                print(f"    ... 还有 {cot_count - 3} 条")
+        else:
+            print(f"  ⚠ 未能提炼出 CoT")
+
+    store.save_ingested_doc(
+        source_path=doc["path"], filename=doc["filename"],
+        file_type=doc["ext"], file_hash=doc["hash"],
+        ticker=ticker, sector=sector, pages=doc["pages"],
+        cot_count=cot_count, cot_file=cot_file_rel,
+    )
+
+
+def _cmd_note(args):
+    """用户论点录入（4 维度结构化 + 自由文本兜底）."""
+    from pathlib import Path
+    from .ingest.user_note import save_user_note, interactive_prompt, DIMENSIONS
+
+    ticker = args.ticker.upper()
+    raw_text = ""
+    structured = {k: "" for k, _ in DIMENSIONS}
+
+    if args.file:
+        p = Path(args.file).expanduser().resolve()
+        if not p.exists():
+            print(f"[NOTE] 文件不存在: {p}")
+            return
+        raw_text = p.read_text(encoding="utf-8-sig")  # 兼容 PowerShell 写的 BOM
+        print(f"[NOTE] 从文件读入: {p.name} ({len(raw_text)} 字)")
+    elif args.message:
+        raw_text = args.message
+    else:
+        # 交互
+        structured = interactive_prompt()
+        if not any(structured.values()):
+            print("[NOTE] 所有维度都为空，已取消")
+            return
+
+    try:
+        path = save_user_note(
+            ticker=ticker,
+            **structured,
+            raw_text=raw_text,
+            sector=args.sector,
+        )
+        print(f"[NOTE] ✓ 已保存 → {path}")
+    except ValueError as e:
+        print(f"[NOTE] {e}")
+
+
+def _cmd_notes(args):
+    """列出用户论点."""
+    from .ingest.user_note import load_user_notes
+
+    notes = load_user_notes(args.ticker)
+    if not notes:
+        print(f"[NOTES] 无记录{f' (ticker={args.ticker})' if args.ticker else ''}")
+        return
+
+    print(f"\n=== 用户论点 ({len(notes)} 条) ===\n")
+    for n in notes:
+        # 第一行 frontmatter 之后的标题/摘要
+        body = n["content"].split("---", 2)[-1].strip()
+        summary = body.split("\n")[0:6]
+        print(f"[{n['created_at']}] {n['ticker']}")
+        print(f"  {n['path']}")
+        for line in summary:
+            if line.strip():
+                print(f"  {line[:100]}")
+        print()
+
+
+def _cmd_cot(args):
+    """fa cot list / score / vote 子命令分发."""
+    if not args.cot_cmd:
+        print("用法: fa cot {list|score|vote} ...\n输入 fa cot --help 查看子命令")
+        return
+
+    from .cot import load_cots, CotScorer, vote, weighted_vote, score_all_cots
+    from .tools.data import fetch_fundamentals
+
+    if args.cot_cmd == "list":
+        cots = load_cots(sector=args.sector, min_signal=args.min_signal)
+        if not cots:
+            print(f"[COT] 无符合条件的 CoT (sector={args.sector}, min_signal={args.min_signal})")
+            return
+        print(f"\n=== CoT 列表 ({len(cots)} 条) ===\n")
+        for c in cots:
+            print(f"  [{c['signal']}/10] {c['trigger']}")
+            print(f"    {c['COT'][:140]}")
+            print(f"    src={c['_source']} | sector={c['_sector']} | id={c['_cot_id']}")
+            print()
+        return
+
+    if args.cot_cmd == "score":
+        ticker = args.ticker.upper()
+        print(f"[COT-SCORE] {ticker}")
+        data = fetch_fundamentals(ticker)
+        if not data:
+            print(f"  ✗ 无法获取 {ticker} 数据")
+            return
+        sector = args.sector or data.get("sector")
+        print(f"  行业: {sector or '未知'}")
+
+        cots = load_cots(sector=args.sector, min_signal=args.min_signal)
+        if not cots:
+            # fallback: 拉全部 CoT
+            cots = load_cots(min_signal=args.min_signal)
+            print(f"  [INFO] 板块 {sector} 无 CoT，回退到全库 ({len(cots)} 条)")
+        if not cots:
+            print(f"  ✗ 无可用 CoT，请先 fa ingest 研报")
+            return
+
+        # 限制条数省 API
+        if len(cots) > args.limit:
+            cots = sorted(cots, key=lambda c: -int(c.get("signal", "5")))[:args.limit]
+            print(f"  [LIMIT] 取信号最高的 {args.limit} 条")
+
+        scorer = CotScorer()
+        def cb(i, n, s):
+            print(f"  [{i}/{n}] {s['match']:5s} ({s['confidence']:3d}%) {s['_trigger'][:50]}")
+        scores = score_all_cots(cots, data, scorer=scorer, progress_callback=cb)
+
+        # 输出汇总
+        print(f"\n--- 投票（等权） ---")
+        v = vote(scores, min_votes=3, min_confidence=60)
+        print(f"  得票: {v['votes']}/{v['total_cots']} → 决策: {v['decision']}")
+        for voter in v["voters"]:
+            print(f"    ✓ [{voter['match']}] {voter['trigger']}")
+
+        print(f"\n--- 加权综合 ---")
+        wv = weighted_vote(scores)
+        print(f"  综合分: {wv['total_score']} (阈值 {wv['min_score']}) → 决策: {wv['decision']}")
+        for ctr in wv["contributors"][:5]:
+            print(f"    [{ctr['signal']}/10|{ctr['match']}|{ctr['confidence']}%] {ctr['trigger']}")
+        return
+
+    if args.cot_cmd == "vote":
+        cots = load_cots(sector=args.sector, min_signal=args.min_signal)
+        if not cots:
+            print(f"[COT-VOTE] 无符合条件的 CoT")
+            return
+        print(f"[COT-VOTE] 用 {len(cots)} 条 CoT 投票，共 {len(args.tickers)} 只股票")
+
+        scorer = CotScorer()
+        results = []
+        for ticker in args.tickers:
+            t = ticker.upper()
+            print(f"\n--- {t} ---")
+            data = fetch_fundamentals(t)
+            if not data:
+                print(f"  ✗ 无数据，跳过")
+                continue
+            def cb(i, n, s):
+                marker = "✓" if s["match"] == "完全符合" else ("△" if s["match"] == "较符合" else "·")
+                print(f"  {marker} [{i}/{n}] {s['match']:5s} {s['_trigger'][:40]}")
+            scores = score_all_cots(cots, data, scorer=scorer, progress_callback=cb)
+            v = vote(scores, min_votes=args.min_votes)
+            wv = weighted_vote(scores)
+            print(f"  得票 {v['votes']}/{v['total_cots']} | 加权 {wv['total_score']} | {v['decision']}")
+            results.append({"ticker": t, "votes": v["votes"],
+                            "score": wv["total_score"], "decision": v["decision"]})
+
+        # 汇总持仓清单
+        results.sort(key=lambda r: (-r["votes"], -r["score"]))
+        print(f"\n{'='*60}")
+        print(f"持仓清单（按得票排序）:")
+        for r in results:
+            mark = "★" if r["decision"] == "纳入持仓" else ("·" if r["decision"] == "观察" else "✗")
+            print(f"  {mark} {r['ticker']:12s} votes={r['votes']:2d} score={r['score']:.2f} {r['decision']}")
+        return
 
 
 def _cmd_dash():
