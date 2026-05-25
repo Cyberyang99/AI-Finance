@@ -86,6 +86,7 @@ def main():
     pi.add_argument("--sector", help="绑定板块 (例: AI/半导体)")
     pi.add_argument("--batch", action="store_true", help="批量摄入目录下所有支持格式的文件")
     pi.add_argument("--no-cot", action="store_true", help="只抽文，不调用 LLM 提炼 CoT")
+    pi.add_argument("--force", action="store_true", help="强制重新提炼 CoT (覆盖已有)")
 
     # note (P0)
     pn = sub.add_parser("note", help="录入用户论点 (4 维度: 论点/护城河/反证/时间+仓位)")
@@ -374,10 +375,11 @@ def _cmd_ingest(args):
         files = [target]
 
     for f in files:
-        _ingest_one(f, args.ticker, args.sector, with_cot=not args.no_cot)
+        _ingest_one(f, args.ticker, args.sector, with_cot=not args.no_cot,
+                    force=getattr(args, "force", False))
 
 
-def _ingest_one(fpath, ticker, sector, with_cot=True):
+def _ingest_one(fpath, ticker, sector, with_cot=True, force=False):
     """摄入单文件。"""
     from .ingest import ingest_file
     from .ingest.cot_extractor import extract_cot, save_cot_file
@@ -391,11 +393,17 @@ def _ingest_one(fpath, ticker, sector, with_cot=True):
 
     print(f"  ✓ 抽文成功: {len(doc['text'])} 字 / {doc['pages']} 页 / hash={doc['hash']}")
 
-    # 去重逻辑：已有 CoT 才跳过；之前 --no-cot 进过的允许补 CoT
+    # 去重逻辑：已有 CoT 才跳过；之前 --no-cot 进过的允许补 CoT；--force 强制覆盖
     existing = [r for r in store.list_ingested(limit=10000) if r["file_hash"] == doc["hash"]]
-    if existing and existing[0].get("cot_count", 0) > 0 and with_cot:
-        print(f"  ⚠ 已摄入并提炼过 {existing[0]['cot_count']} 条 CoT，跳过")
+    if existing and existing[0].get("cot_count", 0) > 0 and with_cot and not force:
+        print(f"  ⚠ 已摄入并提炼过 {existing[0]['cot_count']} 条 CoT，跳过 (用 --force 强制重抽)")
         return
+    if existing and existing[0].get("cot_file") and force:
+        from pathlib import Path as _P
+        old_cot = _P(__file__).resolve().parent.parent / "memory" / existing[0]["cot_file"]
+        if old_cot.exists():
+            old_cot.unlink()
+            print(f"  ↺ --force: 删除旧 CoT 文件 {old_cot.name}")
 
     cot_count = 0
     cot_file_rel = None
