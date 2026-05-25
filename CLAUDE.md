@@ -35,6 +35,11 @@ fa/                       # 代码
     cot_extractor.py      # 研报 → CoT 三段式
     user_note.py          # 用户论点结构化录入
 
+docs/                     # 项目文档
+  ROADMAP.md              # 路线图（Tier 1/2/3 + 不做清单）
+  DEV_NOTES.md            # 设计决策日志 + 踩坑记录
+  USAGE.md                # 日常使用命令速查
+
 memory/                   # 持久化数据（git 管理，可读、可追溯）
   framework/              # L1 硬框架（人改）
     checklist.md          # 商业模式检查清单
@@ -84,13 +89,17 @@ fa deep 2513.HK                 # 端到端冒烟（DeepSeek 真实调用）
 
 ## 路线图
 
+完整版见 [docs/ROADMAP.md](docs/ROADMAP.md)。
+
 | Phase | 内容 | 状态 |
 |---|---|---|
-| 已完成 | scan / deep / review / evolve / critique / Critic / Recall / Evolution / Performance | ✅ |
-| **P0**（当前） | ingest 4 格式 + fa note 4 维度 + memory/knowledge/cot/ + memory/theses/user/ | 🚧 |
-| P1 | Reflector + 笔记冲突解决 (add/skip/replace/branch) + sector_scope 硬过滤 | ⏳ |
-| P2 | CoT 单链回测 + 联合投票选股 | ⏳ |
-| P3 | GEPA 反思式进化 + Mem-Palace 层级 + 多通道入口 | ⏳ |
+| 基础 | scan / deep / review / evolve / critique / Critic / Recall / Evolution / Performance | ✅ |
+| **P0** | ingest 4 格式 + fa note 4 维度 + memory/knowledge/cot/ + memory/theses/user/ | ✅ |
+| **P1** | Reflector + 笔记冲突解决 (add/skip/replace/branch) + sector_scope 硬过滤 | ✅ |
+| **P2** | CoT 联合投票选股 + deep 模式 CoT 辅助证据 | ✅ |
+| **Tier 1** | CoT 合并迭代 + note 自动结构化 + import 通用入口 | ✅ |
+| Tier 2 | fa chat / Web UI / 微信 bot / 多 workspace（按用户实测痛点决定优先级） | ⏳ |
+| Tier 3 | Mem-Palace 层级 + GEPA 进化 + CoT 单链回测 + 多模态 | ⏳ |
 
 ## 关键配置（不进 git）
 
