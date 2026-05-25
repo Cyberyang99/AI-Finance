@@ -27,10 +27,11 @@ from pathlib import Path
 
 from .config import load_config
 from .tools.sector import find_sector_peers, list_sectors
-from .memory import MemoryStore
+from .memory import MemoryStore, PerformanceTracker
 
 
 store = MemoryStore()
+performance = PerformanceTracker(store)
 
 
 def main():
@@ -51,10 +52,16 @@ def main():
     # review
     pr = sub.add_parser("review", help="定期回顾")
     pr.add_argument("-d", "--days", type=int, default=90)
+    pr.add_argument("--no-critic", action="store_true", help="跳过 Critic LLM 评审（省 API 费）")
 
     # evolve
     pe = sub.add_parser("evolve", help="进化分析")
     pe.add_argument("--apply", type=int, help="执行指定编号的框架更新建议")
+
+    # critique
+    pc = sub.add_parser("critique", help="查看某只股票最近一次 Critic 评审")
+    pc.add_argument("ticker", help="股票代码")
+    pc.add_argument("--rerun", action="store_true", help="重新触发 Critic 评审（消耗 API）")
 
     # dashboard
     sub.add_parser("dash", help="仪表盘")
@@ -81,6 +88,8 @@ def main():
         _cmd_review(args)
     elif args.cmd == "evolve":
         _cmd_evolve(args)
+    elif args.cmd == "critique":
+        _cmd_critique(args)
     elif args.cmd == "dash":
         _cmd_dash()
     elif args.cmd == "sectors":
@@ -114,23 +123,120 @@ def _cmd_deep(args):
 
 def _cmd_review(args):
     from .agent import do_review
-    do_review(args.days)
+    do_review(args.days, with_critic=not args.no_critic)
 
 
 def _cmd_evolve(args):
     from .agent import do_evolve
-    do_evolve()
+    do_evolve(apply_index=args.apply)
+
+
+def _cmd_critique(args):
+    """查看/重跑 Critic 评审。"""
+    import json as _json
+    ticker = args.ticker
+
+    if args.rerun:
+        # 重新触发评审：拉数据 + 验证预测 + 评估 + Critic
+        from .agent import critic, performance, predictions, store as _store
+        from .tools.data import fetch_fundamentals
+
+        thesis = _store.get_thesis(ticker)
+        if not thesis:
+            print(f"[CRITIQUE] {ticker} 无活跃论点")
+            return
+        if not thesis.get("baseline_price"):
+            print(f"[CRITIQUE] {ticker} 缺少基线，请先 store.backfill_baseline()")
+            return
+
+        data = fetch_fundamentals(ticker, with_benchmarks=False)
+        results = predictions.verify(ticker, thesis["id"], data) if data else []
+        correct_n = sum(1 for r in results if r["result"] == "正确")
+        partial_n = sum(1 for r in results if r["result"] == "部分正确")
+        total_n = len(results)
+        subjective = round((correct_n + 0.5 * partial_n) / total_n, 3) if total_n > 0 else None
+
+        perf = performance.evaluate(ticker, subjective_score=subjective)
+        if not perf or "error" in perf:
+            print(f"[CRITIQUE] 无法评估: {perf.get('error') if perf else '未知'}")
+            return
+
+        print(f"[CRITIQUE] 调用 Critic LLM... ({ticker})")
+        critic_out = critic.critique(thesis, perf, results, current_fundamentals=data)
+        performance.attach_critic(perf["performance_id"], critic_out)
+        _render_critique(ticker, perf, critic_out)
+        return
+
+    # 默认：读最近一次评审
+    rows = performance.get_history(ticker)
+    if not rows:
+        print(f"[CRITIQUE] {ticker} 无评审记录。使用 --rerun 触发首次评审。")
+        return
+    latest = rows[0]
+    critic_out = {
+        "critic_score": latest.get("critic_score"),
+        "raw_llm_score": latest.get("raw_llm_score"),
+        "final_score": latest.get("final_score"),
+        "what_worked": latest.get("what_worked") or "",
+        "what_failed": latest.get("what_failed") or "",
+        "improvement_hints": _json.loads(latest.get("improvement_hints") or "[]"),
+        "critique": latest.get("critique") or "",
+        "anchor_adjusted": False,
+    }
+    _render_critique(ticker, latest, critic_out)
+
+
+def _render_critique(ticker: str, perf: dict, critic_out: dict):
+    print(f"\n=== {ticker} Critic 评审 ===")
+    print(f"  评估日:    {perf.get('checkpoint_date')}")
+    print(f"  持仓:      {perf.get('days_held')} 天")
+    print(f"  股票收益:  {perf.get('stock_return'):+.2f}%")
+    print(f"  基准收益:  {perf.get('index_return'):+.2f}%")
+    print(f"  超额收益:  {perf.get('excess_return'):+.2f}%")
+    print(f"")
+    print(f"  客观分:    {perf.get('objective_score')}")
+    print(f"  Critic 分: {critic_out.get('critic_score')} "
+          f"(原始 LLM: {critic_out.get('raw_llm_score')})")
+    print(f"  最终分:    {critic_out.get('final_score')}")
+    print(f"")
+    if critic_out.get("what_worked"):
+        print(f"  ✓ 哪里对了: {critic_out['what_worked']}")
+    if critic_out.get("what_failed"):
+        print(f"  ✗ 哪里错了: {critic_out['what_failed']}")
+    if critic_out.get("improvement_hints"):
+        print(f"\n  改进建议:")
+        for h in critic_out["improvement_hints"]:
+            print(f"    - {h}")
+    if critic_out.get("critique"):
+        print(f"\n  完整评审:\n  {critic_out['critique']}")
 
 
 def _cmd_dash():
     dash = store.dashboard()
+    perf = performance.summary()
+
     print("\n=== 基本面研究Agent 仪表盘 ===\n")
     print(f"  活跃论点:     {dash['active_theses']} 只")
     print(f"  待回顾:       {dash['reviews_due']} 只")
     print(f"  板块知识:     {dash['sectors_known']} 个")
     print(f"  沉淀模式:     {dash['patterns_found']} 个")
     print(f"  最近回顾:     {dash['last_review']}")
+
+    print("\n--- 主观评分（预测验证）---")
     print(f"  预测准确率:   {dash['prediction_accuracy']}")
+
+    print("\n--- 客观评分（vs 大盘超额）---")
+    if perf["total"] == 0:
+        print(f"  尚无评估记录。运行 fa review 触发首次评估。")
+    else:
+        win_rate = perf["win_rate"]
+        avg_ex = perf["avg_excess"]
+        print(f"  评估论点:     {perf['total']} 只 (其中 {perf['wins']} 只跑赢)")
+        print(f"  客观胜率:     {win_rate}%")
+        print(f"  平均超额:     {avg_ex:+.2f}%")
+        print(f"  平均客观分:   {perf['avg_objective_score']}")
+        print(f"  最佳:         {perf['best']['ticker']} ({perf['best']['excess']:+.2f}%)")
+        print(f"  最差:         {perf['worst']['ticker']} ({perf['worst']['excess']:+.2f}%)")
     print()
 
 

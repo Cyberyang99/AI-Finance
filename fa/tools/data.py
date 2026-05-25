@@ -13,13 +13,18 @@ import hashlib
 import time
 import statistics
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 
 
-EODHD_KEY = os.environ.get("EODHD_API_KEY", "")
+def _eodhd_key() -> str:
+    """每次调用时现取，避免模块加载时机问题。"""
+    return os.environ.get("EODHD_API_KEY", "")
+
+
 RMB = 100_000_000
 CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "cache"
 BENCH_DIR = Path(__file__).resolve().parent.parent.parent / "benchmarks"
@@ -165,7 +170,7 @@ def _fetch_eodhd(ticker: str) -> Optional[dict]:
 
     try:
         from eodhd import APIClient
-        api = APIClient(EODHD_KEY)
+        api = APIClient(_eodhd_key())
         data = api.get_fundamentals_data(ticker)
     except Exception as e:
         print(f"  [EODHD] {ticker}: {e}")
@@ -476,3 +481,121 @@ def fetch_batch(tickers: list, max_workers: int = 4, with_benchmarks: bool = Tru
                 print(f"  数据: {done}/{total}")
             time.sleep(0.1)
     return results
+
+
+# ─────────────────────────────────────────────────────────────
+# 历史价格 + 指数价格 (Phase 1: 客观评分闭环用)
+# ─────────────────────────────────────────────────────────────
+
+# 市场基准映射 (全部用 EODHD，统一且稳定)
+MARKET_INDEX = {
+    "A":  {"code": "000300.SHG", "name": "沪深300"},
+    "HK": {"code": "HSI.INDX",   "name": "恒生指数"},
+    "US": {"code": "GSPC.INDX",  "name": "标普500"},
+}
+
+
+def detect_market(ticker: str) -> str:
+    """从 ticker 后缀推断市场。"""
+    if ticker.endswith(".HK"):
+        return "HK"
+    if ticker.endswith((".SHG", ".SHE", ".SZ", ".SH")):
+        return "A"
+    return "US"
+
+
+def _nearest_trading_day(df: "pd.DataFrame", target_date: str) -> Optional[dict]:
+    """从历史 DataFrame 中找到 ≤ target_date 的最近一个交易日的收盘。
+
+    df 需要有 'date' 列（或 DatetimeIndex）和 'close'/'adjusted_close' 列。
+    返回 {date, close} 或 None。
+    """
+    if df is None or df.empty:
+        return None
+
+    target = pd.to_datetime(target_date)
+
+    # 统一时间索引
+    if "date" in df.columns:
+        df = df.copy()
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.set_index("date").sort_index()
+    elif not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
+        df = df.sort_index()
+
+    # 取 ≤ target 的最后一行
+    sub = df[df.index <= target]
+    if sub.empty:
+        return None
+
+    row = sub.iloc[-1]
+    price = _safe(row.get("adjusted_close")) or _safe(row.get("close"))
+    if price is None:
+        return None
+    return {"date": sub.index[-1].strftime("%Y-%m-%d"), "close": price}
+
+
+def _retry(fn, *args, tries: int = 3, delay: float = 1.0, **kwargs):
+    """通用网络重试。akshare 经常 RemoteDisconnected，重试 1-2 次基本能成。"""
+    last = None
+    for i in range(tries):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            last = e
+            if i < tries - 1:
+                time.sleep(delay * (i + 1))
+    if last:
+        raise last
+
+
+def _setup_akshare_env():
+    os.environ.setdefault("NO_PROXY", "")
+    if "eastmoney.com" not in os.environ["NO_PROXY"]:
+        os.environ["NO_PROXY"] = os.environ["NO_PROXY"] + ",eastmoney.com,push2his.eastmoney.com"
+
+
+def _eodhd_history(code: str) -> Optional["pd.DataFrame"]:
+    """统一 EODHD 历史价拉取（带重试）。"""
+    from eodhd import APIClient
+    api = APIClient(_eodhd_key())
+    return _retry(api.get_historical_data, code, interval="d", results=3650)
+
+
+def fetch_price_at(ticker: str, date: str = None) -> Optional[dict]:
+    """拉取股票在某个日期（或最近）的收盘价。
+
+    date: "YYYY-MM-DD"。None = 最新。
+    返回 {ticker, date, close} 或 None。
+    遇到非交易日自动取 ≤date 的最近一个交易日。
+    全部走 EODHD（A/HK/US 统一）。
+    """
+    target_date = date or datetime.now().strftime("%Y-%m-%d")
+    try:
+        df = _eodhd_history(ticker)
+        hit = _nearest_trading_day(df, target_date)
+        if hit:
+            return {"ticker": ticker, **hit}
+    except Exception as e:
+        print(f"  [PRICE] {ticker} @ {target_date}: {e}")
+    return None
+
+
+def fetch_index_at(market: str, date: str = None) -> Optional[dict]:
+    """拉取大盘基准指数在某个日期（或最近）的收盘价。
+
+    market: 'A' / 'HK' / 'US'
+    """
+    cfg = MARKET_INDEX.get(market)
+    if not cfg:
+        return None
+    target_date = date or datetime.now().strftime("%Y-%m-%d")
+    try:
+        df = _eodhd_history(cfg["code"])
+        hit = _nearest_trading_day(df, target_date)
+        if hit:
+            return {"market": market, "index": cfg["code"], "name": cfg["name"], **hit}
+    except Exception as e:
+        print(f"  [INDEX] {market} @ {target_date}: {e}")
+    return None

@@ -13,9 +13,10 @@ from typing import Optional
 
 import anthropic
 
-from .config import ANTHROPIC_KEY, load_config
-from .memory import MemoryStore, PredictionRegistry, EvolutionEngine
+from .config import ANTHROPIC_KEY, ANTHROPIC_BASE_URL, load_config, make_anthropic_client
+from .memory import MemoryStore, PredictionRegistry, EvolutionEngine, PerformanceTracker, SituationStore
 from .memory.store import PROJECT_DIR
+from .agents import CriticAgent, RecallAgent
 from .tools.data import fetch_fundamentals, fetch_batch
 from .tools.sector import find_sector_peers, list_sectors
 from .framework import get_framework_prompt
@@ -23,7 +24,11 @@ from .framework import get_framework_prompt
 # ── 全局实例 ──
 store = MemoryStore()
 predictions = PredictionRegistry(store)
+performance = PerformanceTracker(store)
 evolution = EvolutionEngine(store)
+critic = CriticAgent()
+situations = SituationStore()
+recall = RecallAgent()
 
 FRAMEWORK_DIR = PROJECT_DIR / "memory" / "framework"
 
@@ -166,11 +171,19 @@ SYSTEM_PROMPT_V2 = """你是基本面研究分析师 Agent。你的判断框架�
 ---
 
 {sector_context}
+
+---
+
+{situational_memory}
 """
 
 
-def _build_system_prompt(mode: str, sector: str = None, ticker: str = None) -> str:
-    """渐进式构建系统提示词 — 按模式加载相关内容。"""
+def _build_system_prompt(mode: str, sector: str = None, ticker: str = None,
+                          recalled_notes: list = None) -> str:
+    """渐进式构建系统提示词 — 按模式加载相关内容。
+
+    recalled_notes: 召回的情境笔记 list[dict] (含 body)，注入到 situational_memory 段。
+    """
     framework_summary = _load_framework_summary()
     global_context = _load_global_context()
     sector_context = ""
@@ -186,17 +199,47 @@ def _build_system_prompt(mode: str, sector: str = None, ticker: str = None) -> s
             ticker_history = _load_ticker_context(ticker)
             global_context += "\n\n" + ticker_history
 
+    # 情境记忆段
+    situational_memory = _format_situational_memory(recalled_notes)
+
     # 用 replace 而非 format，避免框架内容中的花括号冲突
     prompt = SYSTEM_PROMPT_V2
     prompt = prompt.replace("{framework_summary}", framework_summary)
     prompt = prompt.replace("{global_context}", global_context)
     prompt = prompt.replace("{sector_context}", sector_context)
+    prompt = prompt.replace("{situational_memory}", situational_memory)
     return prompt
 
 
-# ── Anthropic 客户端 ──
+def _format_situational_memory(notes: list = None) -> str:
+    """把召回的情境笔记格式化成 system prompt 段落。"""
+    if not notes:
+        return "## 情境记忆\n（本次未召回任何历史经验笔记。如有类似案例，请优先参考自身经验。）"
+
+    parts = [
+        "## 情境记忆 — 历史经验笔记",
+        f"> 系统召回了 {len(notes)} 条与当前任务相关的历史经验笔记。",
+        f"> 这些是过往论点的复盘沉淀，请结合当前情境判断是否适用。",
+        "",
+    ]
+    for i, n in enumerate(notes, 1):
+        parts.extend([
+            f"### 笔记 {i}: {n.get('situation', '?')}",
+            f"- 适用行业: {', '.join(n.get('sector_scope', ['all']))}",
+            f"- 置信度: {n.get('confidence', 0.5)}",
+            f"- 召回理由: {n.get('_recall_reason', '相关')}",
+            "",
+            n.get("body", "").strip(),
+            "",
+            "---",
+            "",
+        ])
+    return "\n".join(parts)
+
+
+# ── Anthropic 客户端（自动处理 DeepSeek 代理） ──
 def _make_client() -> anthropic.Anthropic:
-    return anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    return make_anthropic_client()
 
 
 # ── 工具定义 ──
@@ -416,13 +459,38 @@ def do_scan(topic: str, tickers: list[str] = None, output: str = None):
 
 请搜索该板块主要成分股，拉取数据做横向对比。完成后调用 save_sector_knowledge 保存行业知识。"""
 
-    system = _build_system_prompt("scan", sector=topic)
+    # 情境记忆召回
+    recalled_notes = _recall_for_scan(topic, tickers)
+
+    system = _build_system_prompt("scan", sector=topic, recalled_notes=recalled_notes)
     result = _run_agent(system, user_msg, f"scan: {topic}")
 
     if output:
         Path(output).parent.mkdir(parents=True, exist_ok=True)
         Path(output).write_text(result, encoding="utf-8")
         print(f"\n[OUTPUT] {output}")
+
+
+def _recall_for_scan(topic: str, tickers: list[str] = None) -> list:
+    """为 scan 分析召回相关情境笔记。失败不阻塞。"""
+    try:
+        highlights = f"板块: {topic}, 成分股: {len(tickers or [])} 只"
+        ctx = {
+            "ticker": topic,
+            "name": topic,
+            "sector": topic,
+            "task": "scan",
+            "highlights": highlights,
+        }
+        index = situations.read_index()
+        selected = recall.recall(ctx, index, top_k=3)
+        if selected:
+            note_ids = [s["id"] for s in selected]
+            print(f"  [RECALL] 召回 {len(note_ids)} 条情境笔记: {note_ids}")
+            return situations.get_full_notes(note_ids)
+    except Exception as e:
+        print(f"  [RECALL] 跳过: {e}")
+    return []
 
 
 def do_deep(ticker: str):
@@ -433,6 +501,9 @@ def do_deep(ticker: str):
         return
 
     sector = data.get("sector", "")
+
+    # 情境记忆召回
+    recalled_notes = _recall_for_deep(ticker, data)
 
     user_msg = f"""## deep 模式
 
@@ -445,18 +516,44 @@ Ticker: {ticker}
 
 请按五维框架做深度分析。**必须在第四节输出预测注册表。** 完成后调用 save_thesis 保存。"""
 
-    system = _build_system_prompt("deep", sector=sector, ticker=ticker)
+    system = _build_system_prompt("deep", sector=sector, ticker=ticker,
+                                  recalled_notes=recalled_notes)
     _run_agent(system, user_msg, f"deep: {ticker}")
 
 
-def do_review(days: int = 90):
+def _recall_for_deep(ticker: str, data: dict) -> list:
+    """为 deep 分析召回相关情境笔记。失败不阻塞。"""
+    try:
+        highlights = (
+            f"毛利率: {data.get('gross_margin')}%, ROE: {data.get('roe')}%, "
+            f"营收增速: {data.get('revenue_cagr_3y')}%, PE: {data.get('pe')}"
+        )
+        ctx = {
+            "ticker": ticker,
+            "name": data.get("name", ""),
+            "sector": data.get("sector", "未知"),
+            "task": "deep",
+            "highlights": highlights,
+        }
+        index = situations.read_index()
+        selected = recall.recall(ctx, index, top_k=5)
+        if selected:
+            note_ids = [s["id"] for s in selected]
+            print(f"  [RECALL] 召回 {len(note_ids)} 条情境笔记: {note_ids}")
+            return situations.get_full_notes(note_ids)
+    except Exception as e:
+        print(f"  [RECALL] 跳过: {e}")
+    return []
+
+
+def do_review(days: int = 90, with_critic: bool = True):
     due = store.list_due_reviews(days)
     if not due:
         print("[REVIEW] 无需回顾")
-        print(store.dashboard())
+        _print_dashboard()
         return
 
-    print(f"[REVIEW] {len(due)} 只待回顾:")
+    print(f"[REVIEW] {len(due)} 只待回顾 (Critic: {'开' if with_critic else '关'})")
 
     for item in due:
         ticker = item["ticker"]
@@ -467,22 +564,79 @@ def do_review(days: int = 90):
         if not thesis:
             continue
 
-        # 拉最新数据
+        # 1. 拉最新数据
         data = fetch_fundamentals(ticker, with_benchmarks=False)
         if not data:
             print(f"  [SKIP] 无数据")
             continue
 
-        # 验证预测
+        # 2. 主观评分（预测验证）
         results = predictions.verify(ticker, thesis["id"], data)
-        print(f"  预测验证: {len(results)} 条")
+        correct_n = sum(1 for r in results if r["result"] == "正确")
+        partial_n = sum(1 for r in results if r["result"] == "部分正确")
+        total_n = len(results)
+        # 主观得分: 正确=1.0, 部分=0.5, 错误=0
+        subjective = None
+        if total_n > 0:
+            subjective = round((correct_n + 0.5 * partial_n) / total_n, 3)
+
+        print(f"  [主观] 预测验证: {correct_n}/{total_n} 正确 (得分 {subjective})")
         for r in results:
-            status_emoji = {"正确": "✓", "部分正确": "△", "错误": "✗", "无法验证": "?"}.get(r["result"], "?")
-            print(f"    {status_emoji} {r['prediction'][:60]}")
+            emoji = {"正确": "✓", "部分正确": "△", "错误": "✗", "无法验证": "?"}.get(r["result"], "?")
+            print(f"    {emoji} {r['prediction'][:60]}")
             print(f"      预期: {r['expected']} → 实际: {r['actual']} ({r['result']})")
 
-        # 保存回顾
-        learnings_str = f"预测准确率: {sum(1 for r in results if r['result']=='正确')}/{len(results)}"
+        # 3. 客观评分（vs 大盘超额）
+        perf = performance.evaluate(ticker, subjective_score=subjective)
+        if perf and "error" not in perf:
+            print(f"  [客观] {perf['verdict']} | 持仓 {perf['days_held']}天")
+            print(f"    股票: {perf['stock_return']:+.2f}% | "
+                  f"{perf['baseline']['index_name']}: {perf['index_return']:+.2f}% | "
+                  f"超额: {perf['excess_return']:+.2f}%")
+            print(f"    客观分: {perf['objective_score']} | "
+                  f"主观分: {perf['subjective_score']} | "
+                  f"综合: {perf['composite_score']} (0.7×客观 + 0.3×主观)")
+        elif perf and "error" in perf:
+            print(f"  [客观] 跳过: {perf['error']}")
+            if perf.get("hint"):
+                print(f"    提示: {perf['hint']}")
+            perf = None
+        else:
+            print(f"  [客观] 跳过: 无法评估")
+            perf = None
+
+        # 4. Critic 评审（独立 LLM 调用，评分锚定在客观分上下 ±0.2）
+        critic_out = None
+        if with_critic and perf:
+            print(f"  [Critic] 调用 LLM 评审...")
+            critic_out = critic.critique(thesis, perf, results, current_fundamentals=data)
+            performance.attach_critic(perf["performance_id"], critic_out)
+
+            if critic_out["critic_score"] is not None:
+                anchor_note = " (已锚定调整)" if critic_out["anchor_adjusted"] else ""
+                print(f"  [Critic] LLM 评分: {critic_out['raw_llm_score']} → "
+                      f"锚定后 {critic_out['critic_score']}{anchor_note}")
+                print(f"  [Critic] 最终综合: {critic_out['final_score']} (0.7×客观 + 0.3×Critic)")
+                if critic_out["what_worked"]:
+                    print(f"  ✓ 对了: {critic_out['what_worked']}")
+                if critic_out["what_failed"]:
+                    print(f"  ✗ 错了: {critic_out['what_failed']}")
+                if critic_out["improvement_hints"]:
+                    print(f"  → 改进建议:")
+                    for h in critic_out["improvement_hints"]:
+                        print(f"     - {h}")
+                if critic_out["critique"]:
+                    print(f"  [评审]\n  {critic_out['critique']}")
+            else:
+                print(f"  [Critic] {critic_out['critique']}")
+
+        # 5. 保存回顾记录
+        score_parts = [f"主观 {subjective}"]
+        if perf:
+            score_parts.append(f"客观 {perf['objective_score']}")
+        if critic_out and critic_out.get("final_score") is not None:
+            score_parts.append(f"最终 {critic_out['final_score']}")
+        learnings_str = " | ".join(score_parts)
         store.save_review(
             ticker=ticker,
             thesis_id=thesis["id"],
@@ -490,20 +644,40 @@ def do_review(days: int = 90):
             learnings=learnings_str,
         )
 
-    # 分析偏差
-    biases = evolution.analyze_biases()
-    acc = store.get_prediction_accuracy()
+    # 整体汇总
     print(f"\n{'='*60}")
-    print(f"[REVIEW] 整体准确率: {acc['accuracy']}% ({acc['correct']}/{acc['total']})")
+    summary = performance.summary()
+    if summary["total"] > 0:
+        print(f"[组合表现] {summary['total']} 只 | 胜率 {summary['win_rate']}% | "
+              f"平均超额 {summary['avg_excess']:+.2f}% | 平均客观分 {summary['avg_objective_score']}")
+        print(f"  最佳: {summary['best']['ticker']} ({summary['best']['excess']:+.2f}%) | "
+              f"最差: {summary['worst']['ticker']} ({summary['worst']['excess']:+.2f}%)")
 
+    acc = store.get_prediction_accuracy()
+    if acc["total"] > 0:
+        print(f"[预测准确率] {acc['accuracy']}% ({acc['correct']}/{acc['total']})")
+
+    biases = evolution.analyze_biases()
     if biases["weakest"]:
-        print("最弱维度:")
+        print("[最弱维度]:")
         for m, a in biases["weakest"]:
             print(f"  {m}: {a}%")
 
 
-def do_evolve():
-    """进化引擎: 分析偏差 → 提取模式 → 建议框架更新。"""
+def _print_dashboard():
+    """简易仪表盘 (do_review 无任务时调用)。"""
+    dash = store.dashboard()
+    summary = performance.summary()
+    print(f"\n  活跃论点: {dash['active_theses']} | 待回顾: {dash['reviews_due']}")
+    if summary["total"] > 0:
+        print(f"  组合胜率: {summary['win_rate']}% | 平均超额: {summary['avg_excess']:+.2f}%")
+
+
+def do_evolve(apply_index: int = None):
+    """进化引擎: 分析偏差 → 提取模式 → 建议框架更新。
+
+    apply_index: 如果指定，直接执行该编号的建议（1-based）。
+    """
     print("[EVOLVE] 分析预测偏差...")
     biases = evolution.analyze_biases()
 
@@ -535,6 +709,7 @@ def do_evolve():
 
     if not suggestions:
         print("  当前框架无需调整。")
+        return
 
     for i, s in enumerate(suggestions):
         print(f"\n  --- 建议 {i+1} [{s['confidence']}置信度] ---")
@@ -543,5 +718,31 @@ def do_evolve():
         print(f"  原因: {s['reason']}")
         print(f"  内容: {s['suggested_content'][:200]}...")
 
+    # ── apply 模式 ──
+    if apply_index is not None:
+        if apply_index < 1 or apply_index > len(suggestions):
+            print(f"\n[EVOLVE] 无效编号: {apply_index} (有效: 1-{len(suggestions)})")
+            return
+        s = suggestions[apply_index - 1]
+        print(f"\n[EVOLVE] 执行建议 {apply_index}...")
+        result = evolution.execute_update(s)
+
+        # 如果目标是 framework 文件，写入实际文件
+        target = s["target"]
+        if target.startswith("framework/") and s["type"] in ("add", "modify"):
+            fname = target.replace("framework/", "")
+            fpath = FRAMEWORK_DIR / fname
+            if s["type"] == "add":
+                existing = fpath.read_text(encoding="utf-8") if fpath.exists() else ""
+                new_content = existing + "\n\n" + s["suggested_content"]
+                fpath.write_text(new_content, encoding="utf-8")
+                print(f"  已追加到 {fpath}")
+            elif s["type"] == "modify":
+                fpath.write_text(s["suggested_content"], encoding="utf-8")
+                print(f"  已覆盖 {fpath}")
+
+        print(f"  {result['status']}: {result['target']}")
+        return
+
     if suggestions:
-        print(f"\n  共 {len(suggestions)} 条建议。审核后运行 fa evolve --apply 执行。")
+        print(f"\n  共 {len(suggestions)} 条建议。审核后运行 fa evolve --apply N 执行。")

@@ -23,8 +23,10 @@ class EvolutionEngine:
         - 是否系统性高估/低估
         """
         with self.store._conn() as c:
+            # theses 表没有 sector 字段，sector 信息在分析时从基本面数据动态取
+            # 这里改成从 key_metrics JSON 里取，没有就归"未知"
             rows = c.execute("""
-                SELECT r.prediction_results, t.sector
+                SELECT r.prediction_results, t.key_metrics, t.ticker
                 FROM reviews r
                 JOIN theses t ON r.thesis_id = t.id
                 ORDER BY r.reviewed_at DESC
@@ -38,7 +40,11 @@ class EvolutionEngine:
 
         for row in rows:
             results = json.loads(row["prediction_results"]) if row["prediction_results"] else []
-            sector = row["sector"] or "未知"
+            try:
+                km = json.loads(row["key_metrics"]) if row["key_metrics"] else {}
+            except Exception:
+                km = {}
+            sector = km.get("sector") or "未知"
 
             if sector not in sector_stats:
                 sector_stats[sector] = {"correct": 0, "total": 0}

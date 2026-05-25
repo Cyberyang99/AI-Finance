@@ -44,7 +44,13 @@ class MemoryStore:
                     created_at TEXT DEFAULT (datetime('now')),
                     updated_at TEXT DEFAULT (datetime('now')),
                     review_due TEXT,                 -- 下次回顾日期
-                    status TEXT DEFAULT 'active'     -- active / archived / falsified
+                    status TEXT DEFAULT 'active',    -- active / archived / falsified
+                    -- Phase 1: 基线快照（客观评分用）
+                    market TEXT,                     -- A / HK / US
+                    baseline_date TEXT,              -- 基线快照日期
+                    baseline_price REAL,             -- 论点建立时股价
+                    baseline_index REAL,             -- 论点建立时大盘指数
+                    baseline_index_name TEXT         -- 基准名称（沪深300/恒生/标普500）
                 );
 
                 -- 情景记忆: 回顾记录
@@ -56,6 +62,32 @@ class MemoryStore:
                     framework_feedback TEXT,          -- 框架是否需要调整
                     learnings TEXT,                   -- 提取的经验教训
                     reviewed_at TEXT DEFAULT (datetime('now'))
+                );
+
+                -- Phase 1: 客观表现追踪 + Phase 2: Critic 评分
+                CREATE TABLE IF NOT EXISTS performance (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    thesis_id INTEGER REFERENCES theses(id),
+                    ticker TEXT NOT NULL,
+                    checked_at TEXT DEFAULT (datetime('now')),
+                    checkpoint_date TEXT,             -- 评估时点（取价的实际交易日）
+                    days_held INTEGER,                -- 持仓天数
+                    current_price REAL,
+                    current_index REAL,
+                    stock_return REAL,                -- 股价收益率 %
+                    index_return REAL,                -- 基准收益率 %
+                    excess_return REAL,               -- 超额收益 %
+                    objective_score REAL,             -- 0.0-1.0 客观得分
+                    subjective_score REAL,            -- 0.0-1.0 主观得分（预测验证准确率）
+                    composite_score REAL,             -- 加权综合得分（Phase1: 0.7×obj + 0.3×subj）
+                    -- Phase 2: Critic Agent 输出
+                    critic_score REAL,                -- Critic LLM 锚定后评分
+                    raw_llm_score REAL,               -- Critic LLM 原始评分
+                    final_score REAL,                 -- 最终得分 0.7×obj + 0.3×critic
+                    what_worked TEXT,                 -- Critic: 哪些判断对了
+                    what_failed TEXT,                 -- Critic: 哪些判断错了
+                    improvement_hints TEXT,           -- Critic: JSON list 改进建议
+                    critique TEXT                     -- Critic: 完整批评 200-400字
                 );
 
                 -- 软知识: 板块知识
@@ -100,14 +132,51 @@ class MemoryStore:
                 CREATE INDEX IF NOT EXISTS idx_theses_review ON theses(review_due);
                 CREATE INDEX IF NOT EXISTS idx_reviews_ticker ON reviews(ticker);
                 CREATE INDEX IF NOT EXISTS idx_sector_name ON sector_knowledge(sector);
+                CREATE INDEX IF NOT EXISTS idx_perf_thesis ON performance(thesis_id);
+                CREATE INDEX IF NOT EXISTS idx_perf_ticker ON performance(ticker);
             """)
+            self._migrate()
+
+    def _migrate(self):
+        """对已有数据库追加新字段（兼容老 schema）。"""
+        with self._conn() as c:
+            # theses 表 Phase 1 基线字段
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(theses)").fetchall()}
+            for col, ddl in [
+                ("market", "TEXT"),
+                ("baseline_date", "TEXT"),
+                ("baseline_price", "REAL"),
+                ("baseline_index", "REAL"),
+                ("baseline_index_name", "TEXT"),
+            ]:
+                if col not in cols:
+                    c.execute(f"ALTER TABLE theses ADD COLUMN {col} {ddl}")
+
+            # performance 表 Phase 2 Critic 字段
+            pcols = {r["name"] for r in c.execute("PRAGMA table_info(performance)").fetchall()}
+            for col, ddl in [
+                ("critic_score", "REAL"),
+                ("raw_llm_score", "REAL"),
+                ("final_score", "REAL"),
+                ("what_worked", "TEXT"),
+                ("what_failed", "TEXT"),
+                ("improvement_hints", "TEXT"),
+                ("critique", "TEXT"),
+            ]:
+                if pcols and col not in pcols:
+                    c.execute(f"ALTER TABLE performance ADD COLUMN {col} {ddl}")
 
     # ── 论点操作 ──
 
     def save_thesis(self, ticker: str, thesis: str, assumptions: list = None,
                     predictions: list = None, risk_flags: list = None,
-                    key_metrics: dict = None, review_due: str = None):
-        """保存/更新个股论点。"""
+                    key_metrics: dict = None, review_due: str = None,
+                    record_baseline: bool = True):
+        """保存/更新个股论点。
+
+        record_baseline=True 时自动拉取当前股价 + 大盘指数作为基线快照。
+        如果是更新已有论点（不是新建），不重置基线。
+        """
         if review_due is None:
             review_due = (datetime.now() + timedelta(days=90)).strftime("%Y-%m-%d")
 
@@ -117,6 +186,7 @@ class MemoryStore:
             ).fetchone()
 
             if existing:
+                # 更新不重置基线
                 c.execute("""
                     UPDATE theses SET thesis=?, assumptions=?, predictions=?,
                     risk_flags=?, key_metrics=?, updated_at=datetime('now'),
@@ -127,16 +197,69 @@ class MemoryStore:
                       json.dumps(risk_flags or [], ensure_ascii=False),
                       json.dumps(key_metrics or {}, ensure_ascii=False),
                       review_due, existing["id"]))
+                return existing["id"]
             else:
+                # 新建时尝试记录基线
+                baseline = self._capture_baseline(ticker) if record_baseline else {}
                 c.execute("""
                     INSERT INTO theses (ticker, thesis, assumptions, predictions,
-                    risk_flags, key_metrics, review_due)
-                    VALUES (?,?,?,?,?,?,?)
+                    risk_flags, key_metrics, review_due,
+                    market, baseline_date, baseline_price, baseline_index, baseline_index_name)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (ticker, thesis, json.dumps(assumptions or [], ensure_ascii=False),
                       json.dumps(predictions or [], ensure_ascii=False),
                       json.dumps(risk_flags or [], ensure_ascii=False),
                       json.dumps(key_metrics or {}, ensure_ascii=False),
-                      review_due))
+                      review_due,
+                      baseline.get("market"),
+                      baseline.get("baseline_date"),
+                      baseline.get("baseline_price"),
+                      baseline.get("baseline_index"),
+                      baseline.get("baseline_index_name")))
+                return c.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    def _capture_baseline(self, ticker: str, date: str = None) -> dict:
+        """抓取基线快照: 股价 + 大盘指数。失败返回空 dict（不阻塞保存）。"""
+        try:
+            # 延迟 import 避免循环依赖
+            from ..tools.data import fetch_price_at, fetch_index_at, detect_market
+            market = detect_market(ticker)
+            price = fetch_price_at(ticker, date)
+            idx = fetch_index_at(market, date)
+            if not price or not idx:
+                return {}
+            return {
+                "market": market,
+                "baseline_date": price["date"],
+                "baseline_price": price["close"],
+                "baseline_index": idx["close"],
+                "baseline_index_name": idx["name"],
+            }
+        except Exception as e:
+            print(f"  [BASELINE] {ticker} 基线抓取失败: {e}")
+            return {}
+
+    def backfill_baseline(self, ticker: str, baseline_date: str = None) -> bool:
+        """为已存在的论点补录基线（用于历史数据迁移）。"""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT id, baseline_date, updated_at FROM theses WHERE ticker=? AND status='active'",
+                (ticker,)
+            ).fetchone()
+            if not row:
+                return False
+            target_date = baseline_date or row["updated_at"][:10]
+            baseline = self._capture_baseline(ticker, target_date)
+            if not baseline:
+                return False
+            c.execute("""
+                UPDATE theses SET market=?, baseline_date=?, baseline_price=?,
+                baseline_index=?, baseline_index_name=?
+                WHERE id=?
+            """, (baseline["market"], baseline["baseline_date"],
+                  baseline["baseline_price"], baseline["baseline_index"],
+                  baseline["baseline_index_name"], row["id"]))
+            return True
 
     def get_thesis(self, ticker: str) -> Optional[dict]:
         with self._conn() as c:
