@@ -33,15 +33,20 @@ COT_DIR = PROJECT_DIR / "memory" / "knowledge" / "cot"
 
 
 def list_cot_files(sector: Optional[str] = None) -> list[Path]:
-    """列出所有 CoT 文件路径，可按 sector 过滤。"""
+    """列出所有 CoT 文件路径，可按 sector 过滤。
+
+    跳过 _archive/ 子目录（归档的旧文件不参与召回/投票/再合并）。
+    """
     if not COT_DIR.exists():
         return []
     if sector:
         sub = COT_DIR / sector
         if sub.exists():
-            return sorted(sub.glob("*.md"))
+            return sorted(sub.glob("*.md"))  # 不递归，自动跳过子目录
         return []
-    return sorted(COT_DIR.rglob("*.md"))
+    # 全库：rglob 后过滤掉 _archive 路径
+    return sorted(p for p in COT_DIR.rglob("*.md")
+                  if "_archive" not in p.parts)
 
 
 def _parse_frontmatter(text: str) -> dict:

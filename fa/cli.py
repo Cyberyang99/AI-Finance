@@ -119,6 +119,10 @@ def main():
     pcot_v.add_argument("--min-signal", type=int, default=7)
     pcot_v.add_argument("--min-votes", type=int, default=3, help="进入持仓的最低票数")
 
+    pcot_m = cotsub.add_parser("merge", help="同 sector 内 CoT LLM 聚类合并去重")
+    pcot_m.add_argument("--sector", help="只合并某 sector (不指定则全部 sector 逐个跑)")
+    pcot_m.add_argument("--dry-run", action="store_true", help="只看建议，不归档不写盘")
+
     # dashboard
     sub.add_parser("dash", help="仪表盘")
 
@@ -588,6 +592,44 @@ def _cmd_cot(args):
         for r in results:
             mark = "★" if r["decision"] == "纳入持仓" else ("·" if r["decision"] == "观察" else "✗")
             print(f"  {mark} {r['ticker']:12s} votes={r['votes']:2d} score={r['score']:.2f} {r['decision']}")
+        return
+
+    if args.cot_cmd == "merge":
+        from .cot.merger import merge_sector, list_sectors_with_cots
+
+        if args.sector:
+            sectors = [args.sector]
+        else:
+            sectors = [s for s, _ in list_sectors_with_cots()]
+            if not sectors:
+                print("[COT-MERGE] 没有任何 sector 有 CoT")
+                return
+            print(f"[COT-MERGE] 全库扫到 {len(sectors)} 个 sector，逐个合并")
+
+        for sector in sectors:
+            print(f"\n{'='*60}")
+            report = merge_sector(sector, dry_run=args.dry_run)
+            if "skipped" in report:
+                print(f"  [{sector}] {report['skipped']}")
+                continue
+            if "error" in report:
+                print(f"  [{sector}] ✗ {report['error']}")
+                continue
+
+            print(f"  [{sector}] {report['input_count']} → {report['output_count']} 条 "
+                  f"(合并 {report['merged_groups']} 组, 缩减 {report['reduction_pct']}%)")
+
+            if args.dry_run:
+                print(f"  [DRY RUN] 预览：")
+                for p in report.get("preview", []):
+                    tag = f" (合并自 {p['merged_from']} 条)" if p["merged_from"] > 1 else ""
+                    print(f"    [{p['signal']}/10] {p['trigger']}{tag}")
+            else:
+                print(f"  归档旧文件: {len(report.get('archived_files', []))} 份")
+                print(f"  新合并文件: {report.get('new_file', '?')}")
+
+        if args.dry_run:
+            print(f"\n[COT-MERGE] DRY-RUN 完成，未写盘。去掉 --dry-run 真正合并。")
         return
 
 

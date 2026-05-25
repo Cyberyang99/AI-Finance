@@ -9,9 +9,11 @@
 from .loader import load_cots, list_cot_files
 from .scorer import score_cot_against_stock, CotScorer, MATCH_LEVELS, MATCH_VALUE
 from .voter import vote, weighted_vote, score_all_cots
+from .merger import merge_sector, list_sectors_with_cots
 
 __all__ = [
     "load_cots", "list_cot_files",
     "score_cot_against_stock", "CotScorer", "MATCH_LEVELS", "MATCH_VALUE",
     "vote", "weighted_vote", "score_all_cots",
+    "merge_sector", "list_sectors_with_cots",
 ]
