@@ -79,6 +79,16 @@ def main():
     prf.add_argument("--force", action="store_true",
                      help="强制反思，绕过 should_reflect 阈值检查")
 
+    # import (P0 + P1 通用入口)
+    pim = sub.add_parser("import", help="通用入口：按扩展名自动分流，研报走 ingest / .md走 note")
+    pim.add_argument("path", help="文件或目录路径")
+    pim.add_argument("--sector", help="所属板块（默认应用到所有文件）")
+    pim.add_argument("--ticker", help="股票代码（默认应用到所有文件）")
+    pim.add_argument("--no-cot", action="store_true", help="研报跳过 LLM 提炼 CoT")
+    pim.add_argument("--no-structure", action="store_true", help="用户笔记跳过 LLM 拆 4 维度")
+    pim.add_argument("--force", action="store_true", help="强制重抽（覆盖已有 CoT）")
+    pim.add_argument("--dry-run", action="store_true", help="只扫描，不实际入库")
+
     # ingest (P0)
     pi = sub.add_parser("ingest", help="摄入外部文档 (PDF/DOCX/XLSX/PPTX) → 提炼 CoT")
     pi.add_argument("path", help="文件路径，或 --batch 时为目录")
@@ -91,9 +101,11 @@ def main():
     # note (P0)
     pn = sub.add_parser("note", help="录入用户论点 (4 维度: 论点/护城河/反证/时间+仓位)")
     pn.add_argument("ticker", help="股票代码")
-    pn.add_argument("-m", "--message", help="一句话快录")
+    pn.add_argument("-m", "--message", help="一句话快录 (默认 LLM 自动拆 4 维度)")
     pn.add_argument("-f", "--file", help="从 md 文件导入")
     pn.add_argument("--sector", help="所属板块（可选，辅助召回过滤）")
+    pn.add_argument("--no-structure", action="store_true",
+                    help="跳过 LLM 拆解，原文直接进 raw_text 段")
 
     # notes
     pln = sub.add_parser("notes", help="列出用户论点")
@@ -152,6 +164,8 @@ def main():
         _cmd_critique(args)
     elif args.cmd == "reflect":
         _cmd_reflect(args)
+    elif args.cmd == "import":
+        _cmd_import(args)
     elif args.cmd == "ingest":
         _cmd_ingest(args)
     elif args.cmd == "note":
@@ -358,6 +372,118 @@ def _cmd_reflect(args):
           f"replace={stats['replace']} branch={stats['branch']}")
 
 
+def _cmd_import(args):
+    """通用入口：扫文件 → 按扩展名分流到 research/user_note."""
+    from pathlib import Path
+    from .ingest.runner import (
+        scan_dir, classify_file, detect_ticker_from_filename,
+        detect_ticker_from_frontmatter, USER_NOTE_EXT,
+    )
+    from .ingest.user_note import save_user_note, auto_structure, DIMENSIONS
+
+    target = Path(args.path).expanduser().resolve()
+    if not target.exists():
+        print(f"[IMPORT] 路径不存在: {target}")
+        return
+
+    if target.is_file():
+        files = [target]
+    else:
+        files = scan_dir(target, recursive=True)
+
+    if not files:
+        print(f"[IMPORT] 无可识别文件: {target}")
+        return
+
+    # 按类型分桶
+    research = []
+    user_notes = []
+    skipped = []
+    for f in files:
+        c = classify_file(f)
+        if c == "research":
+            research.append(f)
+        elif c == "user_note":
+            user_notes.append(f)
+        else:
+            skipped.append(f)
+
+    print(f"[IMPORT] 扫到 {len(files)} 个文件:")
+    print(f"  研报: {len(research)} | 用户笔记: {len(user_notes)} | 跳过: {len(skipped)}")
+
+    if args.dry_run:
+        print(f"\n[DRY RUN] 预览各文件:")
+        for f in research:
+            print(f"  research → {f.name}")
+        for f in user_notes:
+            t = detect_ticker_from_filename(f.name)
+            if not t:
+                try:
+                    t = detect_ticker_from_frontmatter(f.read_text(encoding="utf-8-sig"))
+                except Exception:
+                    t = None
+            tag = t or "无 ticker → 会跳过"
+            print(f"  user_note ({tag}) → {f.name}")
+        return
+
+    # 1. 先处理用户笔记 (无需 API，且优先入库可影响后续 CoT 召回)
+    if user_notes:
+        print(f"\n--- 用户笔记 ({len(user_notes)} 份) ---")
+    for f in user_notes:
+        _import_user_note(f, sector=args.sector, ticker_override=args.ticker,
+                          use_llm=not args.no_structure)
+
+    # 2. 再批量摄入研报
+    if research:
+        print(f"\n--- 研报 ({len(research)} 份) ---")
+    for f in research:
+        _ingest_one(f, args.ticker, args.sector,
+                    with_cot=not args.no_cot, force=args.force)
+
+    print(f"\n[IMPORT] 完成")
+
+
+def _import_user_note(fpath, sector=None, ticker_override=None, use_llm=True):
+    """单个 .md/.txt 文件作为用户论点入库."""
+    from pathlib import Path
+    from .ingest.runner import detect_ticker_from_filename, detect_ticker_from_frontmatter
+    from .ingest.user_note import save_user_note, auto_structure, DIMENSIONS
+
+    try:
+        raw = Path(fpath).read_text(encoding="utf-8-sig")
+    except Exception as e:
+        print(f"  ✗ {fpath.name}: 读文件失败 - {e}")
+        return
+
+    # 找 ticker：优先 override，否则 frontmatter，否则文件名
+    ticker = ticker_override
+    if not ticker:
+        ticker = detect_ticker_from_frontmatter(raw)
+    if not ticker:
+        ticker = detect_ticker_from_filename(fpath.name)
+    if not ticker:
+        print(f"  ⚠ {fpath.name}: 找不到 ticker（文件名前缀、frontmatter、--ticker 都没指定），跳过")
+        return
+
+    print(f"  [user_note] {fpath.name} → {ticker}")
+    structured = {k: "" for k, _ in DIMENSIONS}
+    if use_llm and raw.strip():
+        extracted = auto_structure(ticker, raw)
+        if extracted:
+            structured.update(extracted)
+            filled = [k for k, v in extracted.items() if v]
+            print(f"    LLM 填充: {', '.join(filled) if filled else '无'}")
+
+    try:
+        path = save_user_note(
+            ticker=ticker, **structured,
+            raw_text=raw, sector=sector,
+        )
+        print(f"    ✓ 已保存 → {path.name}")
+    except ValueError as e:
+        print(f"    ✗ {e}")
+
+
 def _cmd_ingest(args):
     """摄入外部文档 → 抽文 → (可选) LLM 提炼 CoT → 入库."""
     from pathlib import Path
@@ -436,13 +562,14 @@ def _ingest_one(fpath, ticker, sector, with_cot=True, force=False):
 
 
 def _cmd_note(args):
-    """用户论点录入（4 维度结构化 + 自由文本兜底）."""
+    """用户论点录入（4 维度结构化 + 自由文本兜底 + LLM 自动拆解）."""
     from pathlib import Path
-    from .ingest.user_note import save_user_note, interactive_prompt, DIMENSIONS
+    from .ingest.user_note import save_user_note, interactive_prompt, auto_structure, DIMENSIONS
 
     ticker = args.ticker.upper()
     raw_text = ""
     structured = {k: "" for k, _ in DIMENSIONS}
+    use_llm = not getattr(args, "no_structure", False)
 
     if args.file:
         p = Path(args.file).expanduser().resolve()
@@ -451,8 +578,22 @@ def _cmd_note(args):
             return
         raw_text = p.read_text(encoding="utf-8-sig")  # 兼容 PowerShell 写的 BOM
         print(f"[NOTE] 从文件读入: {p.name} ({len(raw_text)} 字)")
+        if use_llm:
+            print(f"[NOTE] LLM 拆解中...")
+            extracted = auto_structure(ticker, raw_text)
+            if extracted:
+                structured.update(extracted)
+                filled = [k for k, v in extracted.items() if v]
+                print(f"[NOTE] LLM 填充了: {', '.join(filled)}")
     elif args.message:
         raw_text = args.message
+        if use_llm:
+            print(f"[NOTE] LLM 拆解中...")
+            extracted = auto_structure(ticker, raw_text)
+            if extracted:
+                structured.update(extracted)
+                filled = [k for k, v in extracted.items() if v]
+                print(f"[NOTE] LLM 填充了: {', '.join(filled)}")
     else:
         # 交互
         structured = interactive_prompt()
