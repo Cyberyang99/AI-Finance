@@ -8,6 +8,9 @@ cache/
 *.egg-info/
 .venv/
 memory/agent.db
+memory/agent.db-shm
+memory/agent.db-wal
+.ingest_v2_run.log
 memory/episodic/theses/
 memory/episodic/scans/
 memory/episodic/reviews/

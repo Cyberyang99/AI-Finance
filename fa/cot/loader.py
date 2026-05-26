@@ -35,18 +35,17 @@ COT_DIR = PROJECT_DIR / "memory" / "knowledge" / "cot"
 def list_cot_files(sector: Optional[str] = None) -> list[Path]:
     """列出所有 CoT 文件路径，可按 sector 过滤。
 
-    跳过 _archive/ 子目录（归档的旧文件不参与召回/投票/再合并）。
+    跳过任何 _archive 开头的子目录（_archive/、_archive_wipe_*/、_archive_regroup_* 等）。
     """
     if not COT_DIR.exists():
         return []
     if sector:
         sub = COT_DIR / sector
         if sub.exists():
-            return sorted(sub.glob("*.md"))  # 不递归，自动跳过子目录
+            return sorted(sub.glob("*.md"))
         return []
-    # 全库：rglob 后过滤掉 _archive 路径
     return sorted(p for p in COT_DIR.rglob("*.md")
-                  if "_archive" not in p.parts)
+                  if not any(part.startswith("_archive") for part in p.parts))
 
 
 def _parse_frontmatter(text: str) -> dict:
@@ -70,33 +69,36 @@ def _parse_frontmatter(text: str) -> dict:
 def _parse_cot_body(body: str) -> list[dict]:
     """从 markdown body 抽出每条 CoT。
 
-    匹配格式:
+    匹配格式（兼容 v1 和 v2）:
       ## CoT N — <trigger>
-      **信号强度**: X/10
+      **信号强度**: X/10  _(传导 X · 历史 Y · 时效 Z)_   ← v2 子分（可选）
       **推理链**: ...
     """
     out = []
-    # 用 lookahead 划分到下一个 ## CoT 或字符串末
     blocks = re.split(r"(?=^## CoT \d+ — )", body, flags=re.MULTILINE)
     for block in blocks:
         block = block.strip()
         if not block.startswith("## CoT"):
             continue
-        # trigger
         m_trig = re.match(r"^## CoT \d+ — (.+?)$", block.split("\n", 1)[0])
         trigger = m_trig.group(1).strip() if m_trig else ""
-        # signal
         m_sig = re.search(r"\*\*信号强度\*\*:\s*(\d+)\s*/\s*10", block)
         signal = m_sig.group(1) if m_sig else "5"
-        # reasoning chain
+        # v2 子分（可选）
+        m_sub = re.search(r"传导\s*(\d+)\s*·\s*历史\s*(\d+)\s*·\s*时效\s*(\d+)", block)
+        sub_scores = {}
+        if m_sub:
+            sub_scores = {
+                "transmission": int(m_sub.group(1)),
+                "history": int(m_sub.group(2)),
+                "recency": int(m_sub.group(3)),
+            }
         m_cot = re.search(r"\*\*推理链\*\*:\s*(.+?)(?=\n##|\Z)", block, re.DOTALL)
         cot_text = m_cot.group(1).strip() if m_cot else ""
         if trigger and cot_text:
-            out.append({
-                "trigger": trigger,
-                "COT": cot_text,
-                "signal": signal,
-            })
+            item = {"trigger": trigger, "COT": cot_text, "signal": signal}
+            item.update(sub_scores)
+            out.append(item)
     return out
 
 
@@ -139,6 +141,10 @@ def load_cots(sector: Optional[str] = None, ticker: Optional[str] = None,
                 sig_n = 5
             if sig_n < min_signal:
                 continue
+            try:
+                quality_rating = int(fm.get("quality_rating", 0))
+            except (TypeError, ValueError):
+                quality_rating = 0
             all_cots.append({
                 **c,
                 "_source": fm.get("source", fp.name),
@@ -147,5 +153,7 @@ def load_cots(sector: Optional[str] = None, ticker: Optional[str] = None,
                 "_tags": file_tags,
                 "_created_at": fm.get("created_at", ""),
                 "_cot_id": f"{fm.get('source_hash', fp.stem)}_{i}",
+                "_quality_rating": quality_rating,
+                "_file_path": str(fp),
             })
     return all_cots

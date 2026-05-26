@@ -20,3 +20,10 @@ history_years = 5   # 回溯多少年财务数据
 [review]
 # 定期回顾设置
 auto_review_days = 90  # 多少天后自动触发回顾提醒
+
+[cot]
+[cot.score_weights]
+# signal = transmission*W_T + history*W_H + recency*W_R (自动归一化)
+transmission = 0.5
+history      = 0.3
+recency      = 0.2

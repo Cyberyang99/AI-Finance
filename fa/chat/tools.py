@@ -211,7 +211,10 @@ def _do_ingest_doc(args: dict, state: dict) -> str:
 
     # ── [3/6] 提 CoT ──
     print(f"     [3/6] LLM 提炼 CoT{'（围绕用户角度）' if comment else ''}...")
-    cots = extract_cot(doc["text"], user_comment=comment)
+    result = extract_cot(doc["text"], user_comment=comment)
+    cots = result["cots"]
+    quality_rating = result.get("quality_rating", 0)
+    quality_reason = result.get("quality_reason", "")
     if not cots:
         store.save_ingested_doc(
             source_path=doc["path"], filename=doc["filename"],
@@ -220,6 +223,8 @@ def _do_ingest_doc(args: dict, state: dict) -> str:
             cot_count=0, cot_file=None,
         )
         return f"⚠ LLM 未能提炼出 CoT。文本太碎或 LLM 抽风，可换个角度重试。"
+    if quality_rating > 0:
+        print(f"           ★ 研报质量: {'⭐' * quality_rating} ({quality_rating}/5) {quality_reason}")
     print(f"           ✓ 提炼 {len(cots)} 条")
 
     # ── [4/6] 判断是否个股深度研究 + 抽 12 维度 note ──
@@ -269,7 +274,8 @@ def _do_ingest_doc(args: dict, state: dict) -> str:
     # ── [6/6] 写文件 + 入库 ──
     print(f"     [6/6] 写 CoT + (如有) note + 入库...")
     cot_path = save_cot_file(cots, ticker, sector_id, doc["filename"], doc["hash"],
-                             user_comment=comment, tags=tags)
+                             user_comment=comment, tags=tags,
+                             quality_rating=quality_rating, quality_reason=quality_reason)
     rel = str(cot_path.relative_to(cot_path.parents[3]))
     print(f"           ✓ CoT → {cot_path.name}")
 

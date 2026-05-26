@@ -98,6 +98,7 @@ fa deep 2513.HK                 # 端到端冒烟（DeepSeek 真实调用）
 | **P1** | Reflector + 笔记冲突解决 (add/skip/replace/branch) + sector_scope 硬过滤 | ✅ |
 | **P2** | CoT 联合投票选股 + deep 模式 CoT 辅助证据 | ✅ |
 | **Tier 1** | CoT 合并迭代 + note 自动结构化 + import 通用入口 | ✅ |
+| **Tier 1.5** | CoT 质量自适应数量 + 显化打分子分 + dash 全库统计 + regroup/edit/rescore + docx 文本框抽取 | ✅ |
 | Tier 2 | fa chat / Web UI / 微信 bot / 多 workspace（按用户实测痛点决定优先级） | ⏳ |
 | Tier 3 | Mem-Palace 层级 + GEPA 进化 + CoT 单链回测 + 多模态 | ⏳ |
 

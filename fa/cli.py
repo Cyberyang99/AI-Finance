@@ -95,10 +95,16 @@ def main():
     pi = sub.add_parser("ingest", help="摄入外部文档 (PDF/DOCX/XLSX/PPTX) → 提炼 CoT")
     pi.add_argument("path", help="文件路径，或 --batch 时为目录")
     pi.add_argument("--ticker", help="绑定个股 (例: 2513.HK)")
-    pi.add_argument("--sector", help="绑定板块 (例: AI/半导体)")
+    pi.add_argument("--sector", help="绑定板块 (例: AI/半导体)；不传则 LLM 自动分类")
     pi.add_argument("--batch", action="store_true", help="批量摄入目录下所有支持格式的文件")
     pi.add_argument("--no-cot", action="store_true", help="只抽文，不调用 LLM 提炼 CoT")
     pi.add_argument("--force", action="store_true", help="强制重新提炼 CoT (覆盖已有)")
+    pi.add_argument("--no-classify", action="store_true",
+                    help="跳过 LLM 自动分类（即使没传 --sector 也用 uncategorized）")
+    pi.add_argument("-c", "--comment", help="一句话评论/角度提示，会注入 CoT prompt")
+    pi.add_argument("--cot-count", type=int, help="强制本份报告抽 N 条 CoT（覆盖质量自适应）")
+    pi.add_argument("--cot-min", type=int, help="最少多少条 CoT")
+    pi.add_argument("--cot-max", type=int, help="最多多少条 CoT")
 
     # note (P0)
     pn = sub.add_parser("note", help="录入用户论点 (4 维度: 论点/护城河/反证/时间+仓位)")
@@ -124,6 +130,9 @@ def main():
     pcot_l.add_argument("--sector", help="按板块过滤（标准 sector id，如 CapitalGoods）")
     pcot_l.add_argument("--tag", help="按主题 tag 过滤（跨板块召回，如 'AI 主题'）")
     pcot_l.add_argument("--min-signal", type=int, default=0, help="只列信号 >= N 的 CoT")
+    pcot_l.add_argument("--group-by", choices=["sector", "tag", "signal", "source", "quality"],
+                        help="按维度聚合输出（替代逐条列表）")
+    pcot_l.add_argument("--limit", type=int, default=200, help="逐条模式下最多列多少条")
 
     pcot_s = cotsub.add_parser("score", help="用相关 CoT 对单只股票打分")
     pcot_s.add_argument("ticker", help="股票代码")
@@ -140,6 +149,22 @@ def main():
     pcot_m = cotsub.add_parser("merge", help="同 sector 内 CoT LLM 聚类合并去重")
     pcot_m.add_argument("--sector", help="只合并某 sector (不指定则全部 sector 逐个跑)")
     pcot_m.add_argument("--dry-run", action="store_true", help="只看建议，不归档不写盘")
+
+    pcot_d = cotsub.add_parser("dash", help="CoT 全库统计：总数 / 板块 / tag / 信号 / 质量 分布")
+    pcot_d.add_argument("--sector", help="只看某 sector")
+    pcot_d.add_argument("--tag", help="只看某 tag")
+    pcot_d.add_argument("--min-signal", type=int, default=0)
+
+    pcot_e = cotsub.add_parser("edit", help="按 cot_id/source 前缀定位文件并用 $EDITOR 打开")
+    pcot_e.add_argument("query", help="cot_id 前缀 / source 文件名片段 / sector 名")
+
+    pcot_rg = cotsub.add_parser("regroup", help="单文件内重新分组合并（不重抽 CoT）")
+    pcot_rg.add_argument("query", help="cot_id 前缀 / source 文件名片段")
+    pcot_rg.add_argument("--dry-run", action="store_true", help="只预览不写盘")
+
+    pcot_rs = cotsub.add_parser("rescore", help="单文件仅重新打分（不重抽 CoT）")
+    pcot_rs.add_argument("query", help="cot_id 前缀 / source 文件名片段")
+    pcot_rs.add_argument("--dry-run", action="store_true")
 
     # dashboard
     sub.add_parser("dash", help="仪表盘")
@@ -564,12 +589,26 @@ def _cmd_ingest(args):
         files = [target]
 
     for f in files:
-        _ingest_one(f, args.ticker, args.sector, with_cot=not args.no_cot,
-                    force=getattr(args, "force", False))
+        _ingest_one(
+            f, args.ticker, args.sector,
+            with_cot=not args.no_cot,
+            force=getattr(args, "force", False),
+            user_comment=getattr(args, "comment", "") or "",
+            cot_count=getattr(args, "cot_count", None),
+            cot_min=getattr(args, "cot_min", None),
+            cot_max=getattr(args, "cot_max", None),
+            auto_classify=not getattr(args, "no_classify", False),
+        )
 
 
-def _ingest_one(fpath, ticker, sector, with_cot=True, force=False, user_comment=""):
-    """摄入单文件。user_comment 可选——会注入到 CoT prompt 并写到 CoT 文件 frontmatter。"""
+def _ingest_one(fpath, ticker, sector, with_cot=True, force=False, user_comment="",
+                cot_count=None, cot_min=None, cot_max=None, auto_classify=True):
+    """摄入单文件。
+
+    user_comment: 注入 CoT prompt 并写 frontmatter
+    cot_count/cot_min/cot_max: 数量约束（覆盖 LLM 质量自适应）
+    auto_classify: 用户未传 sector 时，是否调 LLM 自动分类（默认开）
+    """
     from .ingest import ingest_file
     from .ingest.cot_extractor import extract_cot, save_cot_file
 
@@ -596,30 +635,55 @@ def _ingest_one(fpath, ticker, sector, with_cot=True, force=False, user_comment=
             old_cot.unlink()
             print(f"  ↺ --force: 删除旧 CoT 文件 {old_cot.name}")
 
-    cot_count = 0
+    # 自动分类：用户没指定 --sector 时，调 LLM 从 sectors.yaml 挑
+    final_sector = sector
+    auto_tags = []
+    if not final_sector and auto_classify and with_cot:
+        from .sectors import classify_doc, display_sector
+        print(f"  [LLM] 自动分类中...")
+        cls = classify_doc(doc["filename"], doc["text"], user_comment=user_comment)
+        final_sector = cls["sector_id"]
+        auto_tags = cls.get("tags") or []
+        print(f"  ✓ 分类: {display_sector(final_sector)} "
+              f"(置信度 {cls.get('confidence', '?')}) tags={auto_tags or '(无)'}")
+        if cls.get("reasoning"):
+            print(f"    理由: {cls['reasoning'][:120]}")
+
+    cot_count_out = 0
     cot_file_rel = None
     if with_cot:
         print(f"  [LLM] 提炼 CoT 中{'（围绕用户评论角度）' if user_comment else ''}...")
-        cots = extract_cot(doc["text"], user_comment=user_comment)
-        cot_count = len(cots)
-        if cot_count > 0:
-            cot_path = save_cot_file(cots, ticker, sector, doc["filename"], doc["hash"],
-                                     user_comment=user_comment)
-            cot_file_rel = str(cot_path.relative_to(cot_path.parents[3]))  # AI-Finance/memory/...
-            print(f"  ✓ 提炼 {cot_count} 条 CoT → {cot_file_rel}")
-            # 展示前 3 条
+        result = extract_cot(
+            doc["text"], user_comment=user_comment,
+            min_cots=cot_min, max_cots=cot_max, force_count=cot_count,
+        )
+        cots = result["cots"]
+        cot_count_out = len(cots)
+        quality_rating = result.get("quality_rating", 0)
+        quality_reason = result.get("quality_reason", "")
+        if quality_rating > 0:
+            print(f"  ★ 研报质量: {'⭐' * quality_rating} ({quality_rating}/5) {quality_reason}")
+        if cot_count_out > 0:
+            cot_path = save_cot_file(
+                cots, ticker, final_sector, doc["filename"], doc["hash"],
+                user_comment=user_comment, tags=auto_tags,
+                quality_rating=quality_rating, quality_reason=quality_reason,
+            )
+            cot_file_rel = str(cot_path.relative_to(cot_path.parents[3]))
+            print(f"  ✓ 提炼 {cot_count_out} 条 CoT → {cot_file_rel}")
             for i, c in enumerate(cots[:3], 1):
-                print(f"    {i}. [{c['signal']}/10] {c['trigger']}")
-            if cot_count > 3:
-                print(f"    ... 还有 {cot_count - 3} 条")
+                detail = f"(传导{c.get('transmission', '?')}·历史{c.get('history', '?')}·时效{c.get('recency', '?')})"
+                print(f"    {i}. [{c['signal']}/10] {c['trigger']}  {detail}")
+            if cot_count_out > 3:
+                print(f"    ... 还有 {cot_count_out - 3} 条")
         else:
             print(f"  ⚠ 未能提炼出 CoT")
 
     store.save_ingested_doc(
         source_path=doc["path"], filename=doc["filename"],
         file_type=doc["ext"], file_hash=doc["hash"],
-        ticker=ticker, sector=sector, pages=doc["pages"],
-        cot_count=cot_count, cot_file=cot_file_rel,
+        ticker=ticker, sector=final_sector, pages=doc["pages"],
+        cot_count=cot_count_out, cot_file=cot_file_rel,
     )
 
 
@@ -814,7 +878,7 @@ def _cmd_cot(args):
                         print(f"[COT] '{sector_arg}' 是主题 → 按 tag='{tag_arg}' 跨板块召回")
                     sector_arg = None
                 else:
-                    sector_arg = resolved  # 用标准化的 sector id
+                    sector_arg = resolved
         cots = load_cots(sector=sector_arg, min_signal=args.min_signal, tag=tag_arg)
         if not cots:
             filters = f"sector={sector_arg}, min_signal={args.min_signal}"
@@ -822,12 +886,70 @@ def _cmd_cot(args):
                 filters += f", tag={tag_arg}"
             print(f"[COT] 无符合条件的 CoT ({filters})")
             return
-        print(f"\n=== CoT 列表 ({len(cots)} 条) ===\n")
-        for c in cots:
-            print(f"  [{c['signal']}/10] {c['trigger']}")
+
+        group_by = getattr(args, "group_by", None)
+        if group_by:
+            from collections import Counter
+            print(f"\n=== CoT 聚合 by {group_by} ({len(cots)} 条) ===\n")
+            if group_by == "sector":
+                ctr = Counter(c.get("_sector") or "uncategorized" for c in cots)
+            elif group_by == "tag":
+                ctr = Counter()
+                for c in cots:
+                    for t in c.get("_tags", []):
+                        ctr[t] += 1
+                    if not c.get("_tags"):
+                        ctr["(无 tag)"] += 1
+            elif group_by == "signal":
+                from .cot.stats import _signal_bucket
+                ctr = Counter(_signal_bucket(c.get("signal", "5")) for c in cots)
+            elif group_by == "source":
+                ctr = Counter(c.get("_source", "?") for c in cots)
+            elif group_by == "quality":
+                ctr = Counter(c.get("_quality_rating", 0) or "未评级" for c in cots)
+            max_n = max(ctr.values(), default=1)
+            for key, n in ctr.most_common():
+                bar = "▰" * max(1, int(n / max_n * 20))
+                label = f"⭐ × {key}" if group_by == "quality" and isinstance(key, int) else str(key)
+                print(f"  {label:<32} {n:4d}  {bar}")
+            return
+
+        limit = getattr(args, "limit", 200) or 200
+        print(f"\n=== CoT 列表 ({len(cots)} 条{'，截到 ' + str(limit) if len(cots) > limit else ''}) ===\n")
+        for c in cots[:limit]:
+            sub = ""
+            if "transmission" in c and "history" in c and "recency" in c:
+                sub = f" _(传导{c['transmission']}·历史{c['history']}·时效{c['recency']})_"
+            print(f"  [{c['signal']}/10]{sub} {c['trigger']}")
             print(f"    {c['COT'][:140]}")
             print(f"    src={c['_source']} | sector={c['_sector']} | id={c['_cot_id']}")
             print()
+        return
+
+    if args.cot_cmd == "dash":
+        from .cot import compute_stats, render_dashboard
+        sector_arg = args.sector
+        tag_arg = getattr(args, "tag", None)
+        if sector_arg:
+            from .sectors import resolve_alias
+            sector_arg = resolve_alias(sector_arg) or sector_arg
+        stats = compute_stats(sector=sector_arg, tag=tag_arg, min_signal=args.min_signal)
+        if stats["total_cots"] == 0:
+            print(f"[COT-DASH] 全库无 CoT (filters: sector={sector_arg}, tag={tag_arg}, min_signal={args.min_signal})")
+            return
+        print(render_dashboard(stats))
+        return
+
+    if args.cot_cmd == "edit":
+        _cmd_cot_edit(args.query)
+        return
+
+    if args.cot_cmd == "regroup":
+        _cmd_cot_regroup(args.query, dry_run=args.dry_run)
+        return
+
+    if args.cot_cmd == "rescore":
+        _cmd_cot_rescore(args.query, dry_run=args.dry_run)
         return
 
     if args.cot_cmd == "score":
@@ -945,6 +1067,81 @@ def _cmd_cot(args):
         if args.dry_run:
             print(f"\n[COT-MERGE] DRY-RUN 完成，未写盘。去掉 --dry-run 真正合并。")
         return
+
+
+def _cmd_cot_edit(query: str):
+    """按 cot_id/source/sector 前缀定位文件并用 $EDITOR 打开。"""
+    import os
+    import subprocess
+    from .cot.local_ops import find_cot_file
+
+    fp = find_cot_file(query)
+    if not fp:
+        print(f"[COT-EDIT] 没找到匹配 '{query}' 的 CoT 文件")
+        return
+    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "notepad"
+    print(f"[COT-EDIT] 打开 {fp} ({editor})")
+    try:
+        subprocess.run([editor, str(fp)])
+        print(f"[COT-EDIT] ✓ 编辑完成")
+    except FileNotFoundError:
+        print(f"[COT-EDIT] 找不到编辑器 '{editor}'，请设置环境变量 EDITOR")
+    except Exception as e:
+        print(f"[COT-EDIT] 调用编辑器失败: {e}")
+
+
+def _cmd_cot_regroup(query: str, dry_run: bool = False):
+    """单文件内 CoT 本地重组（合并去重），不重新调 LLM 抽取。"""
+    from .cot.local_ops import find_cot_file, regroup_file
+
+    fp = find_cot_file(query)
+    if not fp:
+        print(f"[COT-REGROUP] 没找到匹配 '{query}' 的 CoT 文件")
+        return
+    print(f"[COT-REGROUP] 目标文件: {fp}")
+    report = regroup_file(fp, dry_run=dry_run)
+    if "skipped" in report:
+        print(f"  ⚠ {report['skipped']}")
+        return
+    if "error" in report:
+        print(f"  ✗ {report['error']}")
+        return
+    print(f"  {report['input_count']} → {report['output_count']} 条 "
+          f"(合并 {report['merged_groups']} 组，缩减 {report['reduction_pct']}%)")
+    if dry_run:
+        print(f"  [DRY RUN] 预览前 10 条:")
+        for p in report.get("preview", [])[:10]:
+            tag = f" (合并自 {p['merged_from']} 条)" if p["merged_from"] > 1 else ""
+            print(f"    [{p['signal']}/10] {p['trigger']}{tag}")
+        print(f"\n  去掉 --dry-run 真正写盘。")
+    else:
+        print(f"  ↺ 原文件备份: {report.get('backup')}")
+        print(f"  ✓ 新文件: {report.get('new_file')}")
+
+
+def _cmd_cot_rescore(query: str, dry_run: bool = False):
+    """单文件重新打分（仅改 signal/子分，不动 trigger/COT 内容）。"""
+    from .cot.local_ops import find_cot_file, rescore_file
+
+    fp = find_cot_file(query)
+    if not fp:
+        print(f"[COT-RESCORE] 没找到匹配 '{query}' 的 CoT 文件")
+        return
+    print(f"[COT-RESCORE] 目标文件: {fp}")
+    report = rescore_file(fp, dry_run=dry_run)
+    if "skipped" in report:
+        print(f"  ⚠ {report['skipped']}")
+        return
+    if "error" in report:
+        print(f"  ✗ {report['error']}")
+        return
+    print(f"  共 {report['count']} 条，{report['updated']} 条 signal 有变动")
+    for d in report.get("diffs", [])[:10]:
+        print(f"    [{d['old_signal']} → {d['new_signal']}] {d['trigger']}")
+    if dry_run:
+        print(f"\n  去掉 --dry-run 真正写盘。")
+    else:
+        print(f"  ↺ 备份: {report.get('backup')}")
 
 
 def _cmd_dash():

@@ -20,3 +20,12 @@ history_years = 5   # 回溯多少年财务数据
 [review]
 # 定期回顾设置
 auto_review_days = 90  # 多少天后自动触发回顾提醒
+
+[cot]
+# CoT 提取与打分
+[cot.score_weights]
+# signal = transmission*W_T + history*W_H + recency*W_R （会自动归一化）
+# 默认偏重"传导明确性"，因为可复用逻辑首先要链条清楚
+transmission = 0.5   # 传导链清晰度
+history      = 0.3   # 历史可验证性
+recency      = 0.2   # 时效性
