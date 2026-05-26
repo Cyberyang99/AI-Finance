@@ -127,6 +127,103 @@ def auto_structure(ticker: str, freeform_text: str) -> dict:
     return out
 
 
+STRUCTURE_DOC_TEMPLATE = """用户上传了一份外部研报/资料，用来形成对股票 {ticker} 的个人论点。
+
+{comment_section}
+
+## 资料原文（可能较长，已截断）
+
+---
+{text}
+---
+
+## 你的任务
+
+请把这份资料 + 用户的评论（如有）整合成对 {ticker} 的 4 维度投资论点。**严格规则**：
+
+1. **以用户评论为锚**：如果有用户评论，优先围绕评论里关心的角度组织 4 维度；评论里没提的内容可以补，但要克制
+2. 没明确依据的字段留空字符串，不要瞎编
+3. 用资料里的关键数据/表述支撑结论
+4. 不要总结整篇研报，只抽出和投资判断相关的信息
+
+## 4 个维度
+
+- `core_thesis`: 核心论点（看好/看坏的根本判断）
+- `moat`: 护城河 / 核心壁垒
+- `falsification`: 反证条件（什么情况会证伪）
+- `horizon_size`: 预期时间窗口或最大仓位
+
+## 输出格式
+
+严格 JSON（不要 markdown 代码块包裹）：
+
+```
+{{
+  "core_thesis": "...",
+  "moat": "...",
+  "falsification": "...",
+  "horizon_size": ""
+}}
+```
+
+除 JSON 外不要任何其他内容。"""
+
+
+def auto_structure_from_doc(
+    ticker: str, doc_text: str, user_comment: str = "", max_chars: int = 30000
+) -> dict:
+    """从一份外部文档（PDF/PPT/DOCX 抽出来的文本）+ 可选用户评论拆 4 维度。
+
+    与 auto_structure 区别：
+    - 输入更长，需要截断
+    - 优先围绕 user_comment 的角度组织
+    - 上下文里明示 ticker，让 LLM 聚焦
+    """
+    if not doc_text or not doc_text.strip():
+        return {}
+
+    from ..config import load_config, make_anthropic_client
+    cfg = load_config().get("agent", {})
+    model = cfg.get("model", "deepseek-v4-flash")
+
+    text = doc_text
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n\n_(文档过长，已截断)_"
+
+    comment_section = (
+        f"## 用户评论（最重要的指引，请优先围绕这个角度组织 4 维度）\n\n{user_comment.strip()}\n"
+        if user_comment and user_comment.strip()
+        else "## 用户评论\n\n(无 — 自行从资料中提炼最重要的投资逻辑)\n"
+    )
+
+    try:
+        client = make_anthropic_client()
+        resp = client.messages.create(
+            model=model,
+            max_tokens=2000,
+            system=STRUCTURE_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": STRUCTURE_DOC_TEMPLATE.format(
+                ticker=ticker, comment_section=comment_section, text=text
+            )}],
+        )
+        out_text = "".join(b.text for b in resp.content if b.type == "text")
+    except Exception as e:
+        print(f"  [NOTE] LLM 结构化失败: {e}（原文已保留到 raw_text）")
+        return {}
+
+    parsed = _parse_json_obj(out_text)
+    if not parsed:
+        print(f"  [NOTE] JSON 解析失败（原文已保留到 raw_text）")
+        return {}
+
+    out = {}
+    for k, _ in DIMENSIONS:
+        v = parsed.get(k, "")
+        if isinstance(v, str) and v.strip():
+            out[k] = v.strip()
+    return out
+
+
 def _safe_ticker(t: str) -> str:
     return re.sub(r"[\\/:*?\"<>|]", "_", t.strip().upper())
 
@@ -153,11 +250,15 @@ def save_user_note(
     raw_text: str = "",
     weight: float = 2.0,
     sector: Optional[str] = None,
+    user_comment: str = "",
+    source_doc: str = "",
 ) -> Path:
     """保存用户论点到 memory/theses/user/<ticker>_<yyyy-mm-dd>.md.
 
     raw_text: 自由文本（fa note -m / -f 走这个），优先级高于结构化字段
     weight: 召回时的权重（默认 2.0 高于研报 CoT 的 1.0）
+    user_comment: 上传外部文档时用户附的一句话评论，写到顶部最显著位置
+    source_doc: 来源文件名（外部 PDF/PPT/DOCX 等），用于追溯
     """
     USER_THESES_DIR.mkdir(parents=True, exist_ok=True)
     t = _safe_ticker(ticker)
@@ -167,15 +268,24 @@ def save_user_note(
 
     has_structured = any([core_thesis, moat, falsification, horizon_size])
     has_raw = bool(raw_text and raw_text.strip())
+    has_comment = bool(user_comment and user_comment.strip())
 
-    if not has_structured and not has_raw:
-        raise ValueError("空论点：4 个维度和 raw_text 都为空")
+    if not has_structured and not has_raw and not has_comment:
+        raise ValueError("空论点：4 个维度、raw_text、user_comment 都为空")
 
     lines = [
         "---",
         f"ticker: {t}",
         f"sector: {sector or ''}",
         f"source: user",
+    ]
+    if source_doc:
+        lines.append(f"source_doc: {source_doc}")
+    if has_comment:
+        # frontmatter 里用单行存原始评论（转义换行），方便后续召回时直接读
+        safe_comment = user_comment.strip().replace("\n", " ")
+        lines.append(f"user_comment: {safe_comment}")
+    lines.extend([
         f"created_at: {today}",
         f"weight: {weight}",
         f"confidence: high",
@@ -183,7 +293,11 @@ def save_user_note(
         "",
         f"# {t} — 用户论点 ({today})",
         "",
-    ]
+    ])
+
+    # 评论放在最顶部最显眼位置（如果有）
+    if has_comment:
+        lines.extend(["## 🗨 用户评论（投资角度的主观锚点）", "", user_comment.strip(), ""])
 
     if has_structured:
         if core_thesis:
@@ -196,7 +310,9 @@ def save_user_note(
             lines.extend(["## 时间窗口 + 仓位", "", horizon_size, ""])
 
     if has_raw:
-        lines.extend(["## 备注 / 原始想法", "", raw_text.strip(), ""])
+        # 来自外部文档时标注为"原文摘录"，否则"原始想法"
+        section_title = "## 资料原文摘录" if source_doc else "## 备注 / 原始想法"
+        lines.extend([section_title, "", raw_text.strip(), ""])
 
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
@@ -231,3 +347,109 @@ def load_user_notes(ticker: Optional[str] = None) -> list[dict]:
         })
     out.sort(key=lambda x: x["created_at"], reverse=True)
     return out
+
+
+# ── 12 维度 note 保存（新模板） ──
+
+def save_note_12d(
+    ticker: str,
+    payload: dict,
+    *,
+    sector: Optional[str] = None,
+    tags: Optional[list] = None,
+    user_comment: str = "",
+    source_doc: str = "",
+    source: str = "user",
+    weight: float = 2.0,
+    confidence: str = "high",
+    filename_suffix: str = "",
+) -> Path:
+    """保存 12 维度结构化 note 到 memory/theses/user/<ticker>_<date>[_<suffix>].md.
+
+    payload: {dim_id -> 内容}，参考 fa.note_template.empty_payload()
+    sector/tags: 从关联 CoT 继承或人手指定
+    filename_suffix: 文件名后缀，用于区分来源（如 "deep" → <ticker>_<date>_deep.md）
+    """
+    from ..note_template import render_markdown, filled_dims
+
+    USER_THESES_DIR.mkdir(parents=True, exist_ok=True)
+    t = _safe_ticker(ticker)
+    today = date.today().isoformat()
+    if filename_suffix:
+        fname = f"{t}_{today}_{filename_suffix}.md"
+    else:
+        fname = f"{t}_{today}.md"
+    path = USER_THESES_DIR / fname
+
+    # 至少要填一个维度或有 comment
+    if not filled_dims(payload) and not user_comment.strip():
+        raise ValueError("空 note：12 维度全空且无 comment")
+
+    md = render_markdown(
+        ticker=t,
+        payload=payload,
+        sector=sector,
+        tags=tags,
+        created_at=today,
+        user_comment=user_comment,
+        source_doc=source_doc,
+        source=source,
+        weight=weight,
+        confidence=confidence,
+    )
+    path.write_text(md, encoding="utf-8")
+    return path
+
+
+def inherit_sector_tags(ticker: str) -> tuple[Optional[str], list]:
+    """从该 ticker 已有的 CoT 文件读取 sector + tags，用于 note 继承。
+
+    策略：找该 ticker 最近的 CoT 文件，读 frontmatter 拿 sector / tags。
+    """
+    from ..memory.store import PROJECT_DIR
+    cot_root = PROJECT_DIR / "memory" / "knowledge" / "cot"
+    if not cot_root.exists():
+        return None, []
+
+    t = _safe_ticker(ticker)
+    matches = []
+    for fp in cot_root.rglob("*.md"):
+        if "_archive" in fp.parts:
+            continue
+        try:
+            text = fp.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        # 粗解 frontmatter，找 ticker
+        if not text.startswith("---"):
+            continue
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            continue
+        fm_text = parts[1]
+        m = re.search(r"^ticker:\s*(.+)$", fm_text, re.MULTILINE)
+        if not m:
+            continue
+        if m.group(1).strip().upper() != t:
+            continue
+        m_ca = re.search(r"^created_at:\s*(\S+)", fm_text, re.MULTILINE)
+        created = m_ca.group(1) if m_ca else "2000-01-01"
+        matches.append((created, fm_text))
+
+    if not matches:
+        return None, []
+
+    matches.sort(reverse=True)
+    fm_text = matches[0][1]
+
+    sector = None
+    m_s = re.search(r"^sector:\s*(\S+)", fm_text, re.MULTILINE)
+    if m_s:
+        sector = m_s.group(1).strip()
+
+    tags = []
+    m_t = re.search(r"^tags:\s*\[(.+?)\]", fm_text, re.MULTILINE)
+    if m_t:
+        tags = [t.strip() for t in m_t.group(1).split(",") if t.strip()]
+
+    return sector, tags

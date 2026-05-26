@@ -100,23 +100,25 @@ def _parse_cot_body(body: str) -> list[dict]:
     return out
 
 
-def load_cots(sector: Optional[str] = None, ticker: Optional[str] = None,
-              min_signal: int = 0) -> list[dict]:
-    """加载所有 CoT，可按 sector / ticker / 最低信号强度过滤。
+def _parse_tags(tags_str: str) -> list[str]:
+    """解析 frontmatter 里的 `tags: [a, b, c]` 行。"""
+    if not tags_str:
+        return []
+    s = tags_str.strip()
+    if s.startswith("[") and s.endswith("]"):
+        s = s[1:-1]
+    return [t.strip() for t in s.split(",") if t.strip()]
 
-    返回 list[{
-        "trigger": str,
-        "COT": str,
-        "signal": str (1-10),
-        "_source": filename,
-        "_sector": sector,
-        "_ticker": ticker (可空),
-        "_created_at": date string,
-        "_cot_id": <hash>_<index>,
-    }]
+
+def load_cots(sector: Optional[str] = None, ticker: Optional[str] = None,
+              min_signal: int = 0, tag: Optional[str] = None) -> list[dict]:
+    """加载所有 CoT，可按 sector / ticker / 最低信号强度 / tag 过滤。
+
+    tag 过滤：精确匹配 frontmatter 里 tags 数组中的某一项（大小写不敏感）。
     """
     files = list_cot_files(sector)
     all_cots = []
+    target_tag = (tag or "").strip().lower()
     for fp in files:
         try:
             text = fp.read_text(encoding="utf-8")
@@ -125,7 +127,9 @@ def load_cots(sector: Optional[str] = None, ticker: Optional[str] = None,
         fm = _parse_frontmatter(text)
         if ticker and fm.get("ticker") and fm["ticker"] != ticker:
             continue
-        # 解析 body
+        file_tags = _parse_tags(fm.get("tags", ""))
+        if target_tag and not any(target_tag in t.lower() for t in file_tags):
+            continue
         body = text.split("---", 2)[-1]
         cots = _parse_cot_body(body)
         for i, c in enumerate(cots, 1):
@@ -140,6 +144,7 @@ def load_cots(sector: Optional[str] = None, ticker: Optional[str] = None,
                 "_source": fm.get("source", fp.name),
                 "_sector": fm.get("sector", ""),
                 "_ticker": fm.get("ticker", ""),
+                "_tags": file_tags,
                 "_created_at": fm.get("created_at", ""),
                 "_cot_id": f"{fm.get('source_hash', fp.stem)}_{i}",
             })

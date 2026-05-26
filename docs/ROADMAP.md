@@ -2,6 +2,63 @@
 
 写于 2026-05-25。每完成一个 Tier，回来更新这份文档。
 
+---
+
+## 🆕 v2.1 — 自然语言入口 + 两级分类 + 12 维度模板 (2026-05-26)
+
+这一轮聚焦"降低命令行门槛 + 升级 note 严谨度"，新增 `fa chat` 自然语言入口、CoT/note 两级分类体系（GICS + 主题 tags）、note 12 维度模板（替代旧 4 维度）。
+
+### 新增能力速查
+
+| 能力 | 命令 / 行为 |
+|---|---|
+| 自然语言对话 | `fa chat` —— LLM tool use 调底层命令，9 个工具，多轮指代消解 |
+| ticker 模糊查询 | `fa search 茅台` / `fa search HBM` —— EODHD + akshare 缓存（10931 条） |
+| 单文件投喂 | chat 里 `[路径] [描述]` → 抽文 + 自动分类 + 提 CoT + 抽 12 维度 note 一气呵成 |
+| 批量交互式投喂 | `fa import <dir> --interactive` —— 逐个 Y/n/c/s/q + 可加评论 |
+| 笔记升级 | `fa note <ticker> -f <pdf/docx>` —— 文档抽文 + LLM 抽 12 维度 |
+| 笔记编辑 | `fa note <ticker> --edit` —— 用 `$EDITOR` 打开最新 note |
+| CoT 跨主题召回 | `fa cot list --tag "AI 算力"` —— Theme 自动转 tag 查询 |
+| 板块清单 | `fa sectors` —— GICS 24 + Theme 10，含 CoT 覆盖数 |
+
+### CoT 两级分类（`memory/sectors.yaml`）
+
+- **一级 = GICS 24 industry group**：公司业务定位（如 CapitalGoods / Semiconductors）
+- **二级 = 主题 tags（10 个）**：投资视角（AI 算力 / AI 存储 / AI 互联 / 电力能源及设备 / AI 大模型与云 / 机器人 / 太空 / 量子 / 生物医药 / 加密货币）
+- 一公司可属于 1 个一级 + 多个主题；写入按一级建目录，召回按 tag 跨板块
+- `Theme_AIChip` 覆盖整条算力产业链：芯片 + 板级 + 先进封装 + Foundry + 设备 + 材料 + EDA/IP
+
+### 12 维度笔记模板（`fa/note_template.py`）
+
+| # | 维度 | 类型 |
+|---|---|---|
+| 1 | core_thesis 核心论点 | 文本 |
+| 2 | business_breakdown 业务结构 | 文本 |
+| 3 | market_position 行业地位与竞争 | 文本 |
+| 4 | moat 护城河 / 竞争优势 | 文本 |
+| 5 | management_governance 管理层与治理 | 文本 |
+| 6 | financial_quality 财务质地 | 文本 |
+| 7 | **financial_forecast 盈利预测** | **JSON 结构化** |
+| 8 | **long_term_space 远期空间** | **JSON 结构化** |
+| 9 | **valuation_target 估值与目标价** | **JSON 结构化** |
+| 10 | **catalysts 催化剂 / 关键时点** | **JSON 结构化** |
+| 11 | falsification 反证 / 复盘信号 | 文本 |
+| 12 | risks 风险清单 | 文本 |
+
+JSON 字段同时写到 frontmatter（机器可读）和 markdown body（人可读）。
+
+### 三类 note 来源
+
+| source | 文件名 | 触发 |
+|---|---|---|
+| `user` / `user_file` / `user_doc` | `<ticker>_<date>.md` | `fa note -m` / `-f` 命令行 |
+| `llm_ingest` | `<ticker>_<date>.md` | `fa chat` 投喂个股研报时自动产出 |
+| `llm_deep` | `<ticker>_<date>_deep.md` | `fa deep <ticker>` 跑完自动产出 |
+
+note 自动从该 ticker 已有的 CoT 文件继承 sector + tags（`inherit_sector_tags()`）。
+
+---
+
 ## 已完成 (P0 + P1 + P2 + Tier 1)
 
 | 阶段 | 内容 | 落地命令 |
@@ -140,3 +197,72 @@ fa config                           # 看配置
 - 默认认为是 Tier 2 起步
 - 先问用户最近 1-2 周用得最难受的是什么，按那个排优先级
 - 不要凭推断直接做某个 Tier 2 候选
+
+---
+
+## 🛠 TODO（v2.1 之后待做 — 按优先级）
+
+### P1：review 严谨化（最有价值的下一步）
+
+12 维度 note 现在把所有预测都结构化了（`financial_forecast` / `valuation_target` / `catalysts` / `long_term_space`），但 `fa review` 还在用旧逻辑。需要新写 `fa/review_v2.py`：
+
+- [ ] 从 note frontmatter 读 `financial_forecast` JSON
+- [ ] 拉 EODHD 实际财报（quarterly + annual）+ akshare 兜底 A 股分业务拆分
+- [ ] 逐项比对：预测收入 vs 实际、预测净利率 vs 实际、分业务 vs 分业务
+- [ ] 拉股价（EODHD historical），跟 `valuation_target.base.mcap_yi` 对照
+- [ ] `catalysts` 到期检查：到了 `window` 时间窗口，标记"已发生 / 未发生 / 不可判断"
+- [ ] 输出复盘报告：每项一行，准确率打分 + 误差原因（LLM 辅助归因）
+- [ ] 报告写到 `memory/reviews/<ticker>_<date>_v2.md`
+
+预计 3-4 小时。需求触发点：累积了 5-10 份 12 维度 note 之后。
+
+### P2：行业特化模板
+
+12 维度通用模板对所有行业能填，但部分维度颗粒度对某些行业不够贴：
+
+- [ ] 创新药：把 `business_breakdown` 拆为 `pipeline`（在研管线，分阶段：临床前/I/II/III/上市）
+- [ ] 银行：把 `financial_quality` 拆为 `nim / npl_ratio / coverage_ratio / capital_adequacy`
+- [ ] 大模型公司：把 `financial_forecast` 强调 `arr / token_volume / token_price / compute_cost`
+- [ ] 实现方式：`memory/sectors.yaml` 里给每个 sector 配 `template_override`，extract_12d 时读
+
+预计 2 小时（一次只做一个行业）。
+
+### P3：数据迁移工具
+
+旧 4 维度 note 还有少量历史数据，应该升级到 12 维度：
+
+- [ ] `fa migrate notes` 命令：扫 `memory/theses/user/`，遇到 `template_version != 12d_v1` 的文件，LLM 重新跑 extract_12d
+- [ ] 同样的，旧 CoT 文件 frontmatter 没 `tags` 字段的，重跑 classify_doc 补 tags
+
+预计 1 小时。
+
+### P4：交互体验小改进
+
+- [ ] `fa chat` 加 `/confirm on|off` 切换 yolo / 逐步确认模式（当前默认 yolo）
+- [ ] `fa chat` 加 `reclassify_cot(file, new_sector, new_tags)` 工具：自然语言改 CoT 归类
+- [ ] `fa note --append`：同日多次写 note 时合并而不是覆盖
+- [ ] 长任务 Ctrl-C 优雅打断（当前会终止整个 chat）
+
+预计 2 小时（合计）。
+
+### P5：可视化（最远期）
+
+- [ ] Streamlit 本地 web：
+  - sector / tag 树状导航
+  - note 渲染（含 JSON 字段可视化为图表）
+  - review 报告对比视图（预测 vs 实际）
+  - 仪表盘：胜率、超额收益、活跃论点
+- [ ] 触发条件：fa chat 用了 2-4 周后，明确知道哪些 view 真的会被反复看
+
+预计 1-2 周。不要急。
+
+---
+
+## v2.1 设计决策的脚注
+
+- **为什么 GICS 24 而不是 GICS 11**：11 一级太粗（"工业"什么都装），163 子行业又太细；24 个 industry group 是投研常用粒度。
+- **为什么 tags 设计成多选而不是单选**：豪迈这种"业务是机械、增量来自 AI 数据中心电力"的票，单选 tag 必丢信息。
+- **为什么 ticker resolver 用 EODHD + akshare 双源**：EODHD 不识别中文名（"茅台"），akshare 不覆盖美股；双源互补。
+- **为什么 12 维度的 4 个量化字段用 JSON 而不是自由文本**：review 时要机器解析对比实际数据。如果是自由文本就只能靠 LLM 再读一遍。
+- **为什么 ingest_doc 双产出而不是合并**：CoT 是"行业逻辑库"，note 是"个股论点库"，定位不同。CoT 跨股票复用，note 单股票绑定。混在一起会让两个用途都做不好。
+- **为什么 deep note 单独存 `_deep.md`**：deep 是 agent 自动产出，user note 是用户手写。两者并存便于对照"我想的"和"agent 想的"。

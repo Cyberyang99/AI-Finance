@@ -88,6 +88,8 @@ def main():
     pim.add_argument("--no-structure", action="store_true", help="用户笔记跳过 LLM 拆 4 维度")
     pim.add_argument("--force", action="store_true", help="强制重抽（覆盖已有 CoT）")
     pim.add_argument("--dry-run", action="store_true", help="只扫描，不实际入库")
+    pim.add_argument("-i", "--interactive", action="store_true",
+                     help="逐个确认每个文件 [Y/n/c=加评论/s=skip/q=quit]")
 
     # ingest (P0)
     pi = sub.add_parser("ingest", help="摄入外部文档 (PDF/DOCX/XLSX/PPTX) → 提炼 CoT")
@@ -102,10 +104,13 @@ def main():
     pn = sub.add_parser("note", help="录入用户论点 (4 维度: 论点/护城河/反证/时间+仓位)")
     pn.add_argument("ticker", help="股票代码")
     pn.add_argument("-m", "--message", help="一句话快录 (默认 LLM 自动拆 4 维度)")
-    pn.add_argument("-f", "--file", help="从 md 文件导入")
+    pn.add_argument("-f", "--file", help="从文件导入 (支持 md/txt 或 pdf/pptx/docx/xlsx)")
+    pn.add_argument("-c", "--comment", help="一句话评论/角度提示 (上传外部研报时主观加权)")
     pn.add_argument("--sector", help="所属板块（可选，辅助召回过滤）")
     pn.add_argument("--no-structure", action="store_true",
                     help="跳过 LLM 拆解，原文直接进 raw_text 段")
+    pn.add_argument("--edit", action="store_true",
+                    help="打开 $EDITOR 编辑该 ticker 最新一条笔记")
 
     # notes
     pln = sub.add_parser("notes", help="列出用户论点")
@@ -116,7 +121,8 @@ def main():
     cotsub = pcot.add_subparsers(dest="cot_cmd")
 
     pcot_l = cotsub.add_parser("list", help="列出已有 CoT")
-    pcot_l.add_argument("--sector", help="按板块过滤")
+    pcot_l.add_argument("--sector", help="按板块过滤（标准 sector id，如 CapitalGoods）")
+    pcot_l.add_argument("--tag", help="按主题 tag 过滤（跨板块召回，如 'AI 主题'）")
     pcot_l.add_argument("--min-signal", type=int, default=0, help="只列信号 >= N 的 CoT")
 
     pcot_s = cotsub.add_parser("score", help="用相关 CoT 对单只股票打分")
@@ -149,6 +155,17 @@ def main():
 
     # config
     sub.add_parser("config", help="当前配置")
+
+    # chat - 自然语言入口
+    pch = sub.add_parser("chat", help="自然语言对话模式 (推荐入口)")
+    pch.add_argument("--model", help="覆盖 config.toml 的 model")
+
+    # search - ticker 模糊查询
+    psr = sub.add_parser("search", help="ticker 模糊查询：公司名/拼音/代码 → 标准 ticker")
+    psr.add_argument("query", help="查询词，例如：茅台、moutai、600519、Apple")
+    psr.add_argument("--refresh", action="store_true",
+                     help="强制刷新本地 akshare 缓存（默认 14 天过期）")
+    psr.add_argument("-n", "--limit", type=int, default=5, help="返回候选数 (默认 5)")
 
     args = parser.parse_args()
 
@@ -184,6 +201,10 @@ def main():
         _cmd_init()
     elif args.cmd == "config":
         _cmd_config()
+    elif args.cmd == "chat":
+        _cmd_chat(args)
+    elif args.cmd == "search":
+        _cmd_search(args)
     else:
         parser.print_help()
 
@@ -426,6 +447,8 @@ def _cmd_import(args):
             print(f"  user_note ({tag}) → {f.name}")
         return
 
+    interactive = getattr(args, "interactive", False)
+
     # 1. 先处理用户笔记 (无需 API，且优先入库可影响后续 CoT 召回)
     if user_notes:
         print(f"\n--- 用户笔记 ({len(user_notes)} 份) ---")
@@ -436,9 +459,45 @@ def _cmd_import(args):
     # 2. 再批量摄入研报
     if research:
         print(f"\n--- 研报 ({len(research)} 份) ---")
-    for f in research:
+
+    quit_flag = False
+    for idx, f in enumerate(research, 1):
+        if quit_flag:
+            break
+
+        comment = ""
+        if interactive:
+            print(f"\n[{idx}/{len(research)}] {f.name}")
+            print(f"  sector={args.sector or '(未指定)'}  size={f.stat().st_size // 1024} KB")
+            while True:
+                choice = input("  [Y]导入 / [n]跳过 / [c]加评论后导入 / [s]跳过本批剩余 / [q]退出: ").strip().lower()
+                if choice in ("", "y", "yes"):
+                    break
+                if choice in ("n", "no"):
+                    print(f"  ⏭  跳过 {f.name}")
+                    break
+                if choice in ("c", "comment"):
+                    comment = input("  评论(一句话): ").strip()
+                    if comment:
+                        print(f"  ✏  评论已记录: {comment}")
+                    break
+                if choice == "s":
+                    print(f"  ⏭⏭  跳过本批剩余 {len(research) - idx + 1} 份")
+                    quit_flag = True
+                    break
+                if choice == "q":
+                    print(f"  🛑 退出 import")
+                    quit_flag = True
+                    break
+                print(f"  无效输入，请输入 Y/n/c/s/q")
+            if choice in ("n", "no"):
+                continue
+            if quit_flag:
+                break
+
         _ingest_one(f, args.ticker, args.sector,
-                    with_cot=not args.no_cot, force=args.force)
+                    with_cot=not args.no_cot, force=args.force,
+                    user_comment=comment)
 
     print(f"\n[IMPORT] 完成")
 
@@ -509,8 +568,8 @@ def _cmd_ingest(args):
                     force=getattr(args, "force", False))
 
 
-def _ingest_one(fpath, ticker, sector, with_cot=True, force=False):
-    """摄入单文件。"""
+def _ingest_one(fpath, ticker, sector, with_cot=True, force=False, user_comment=""):
+    """摄入单文件。user_comment 可选——会注入到 CoT prompt 并写到 CoT 文件 frontmatter。"""
     from .ingest import ingest_file
     from .ingest.cot_extractor import extract_cot, save_cot_file
 
@@ -522,6 +581,8 @@ def _ingest_one(fpath, ticker, sector, with_cot=True, force=False):
         return
 
     print(f"  ✓ 抽文成功: {len(doc['text'])} 字 / {doc['pages']} 页 / hash={doc['hash']}")
+    if user_comment:
+        print(f"  ✏  用户评论: {user_comment}")
 
     # 去重逻辑：已有 CoT 才跳过；之前 --no-cot 进过的允许补 CoT；--force 强制覆盖
     existing = [r for r in store.list_ingested(limit=10000) if r["file_hash"] == doc["hash"]]
@@ -538,11 +599,12 @@ def _ingest_one(fpath, ticker, sector, with_cot=True, force=False):
     cot_count = 0
     cot_file_rel = None
     if with_cot:
-        print(f"  [LLM] 提炼 CoT 中...")
-        cots = extract_cot(doc["text"])
+        print(f"  [LLM] 提炼 CoT 中{'（围绕用户评论角度）' if user_comment else ''}...")
+        cots = extract_cot(doc["text"], user_comment=user_comment)
         cot_count = len(cots)
         if cot_count > 0:
-            cot_path = save_cot_file(cots, ticker, sector, doc["filename"], doc["hash"])
+            cot_path = save_cot_file(cots, ticker, sector, doc["filename"], doc["hash"],
+                                     user_comment=user_comment)
             cot_file_rel = str(cot_path.relative_to(cot_path.parents[3]))  # AI-Finance/memory/...
             print(f"  ✓ 提炼 {cot_count} 条 CoT → {cot_file_rel}")
             # 展示前 3 条
@@ -562,55 +624,148 @@ def _ingest_one(fpath, ticker, sector, with_cot=True, force=False):
 
 
 def _cmd_note(args):
-    """用户论点录入（4 维度结构化 + 自由文本兜底 + LLM 自动拆解）."""
+    """用户论点录入 — 统一走 12 维度模板.
+
+    输入方式：
+      -m "一句话"               → 短文本，存到 core_thesis
+      -f <md/txt>               → 文本文件，LLM 抽 12 维度
+      -f <pdf/pptx/docx/xlsx>   → 文档抽文 + LLM 抽 12 维度
+      (无 -m 无 -f)             → 交互式 prompt 一句话
+
+    --edit            打开 $EDITOR 编辑该 ticker 最新笔记
+    --no-structure    跳过 LLM，单行直接进 core_thesis
+    -c/--comment      用户角度提示
+    --sector          手工指定 sector（不指定则自动继承 CoT）
+    """
     from pathlib import Path
-    from .ingest.user_note import save_user_note, interactive_prompt, auto_structure, DIMENSIONS
+    from .ingest import (
+        ingest_file, SUPPORTED_EXT, save_note_12d, inherit_sector_tags,
+    )
+    from .note_extractor import extract_12d
+    from .note_template import empty_payload, filled_dims
 
     ticker = args.ticker.upper()
-    raw_text = ""
-    structured = {k: "" for k, _ in DIMENSIONS}
+
+    # --edit 分支
+    if getattr(args, "edit", False):
+        _open_latest_note_in_editor(ticker)
+        return
+
     use_llm = not getattr(args, "no_structure", False)
+    user_comment = (args.comment or "").strip() if getattr(args, "comment", None) else ""
+
+    # 1) 获取 raw_text + source_doc
+    raw_text = ""
+    source_doc = ""
+    source = "user"
 
     if args.file:
         p = Path(args.file).expanduser().resolve()
         if not p.exists():
             print(f"[NOTE] 文件不存在: {p}")
             return
-        raw_text = p.read_text(encoding="utf-8-sig")  # 兼容 PowerShell 写的 BOM
-        print(f"[NOTE] 从文件读入: {p.name} ({len(raw_text)} 字)")
-        if use_llm:
-            print(f"[NOTE] LLM 拆解中...")
-            extracted = auto_structure(ticker, raw_text)
-            if extracted:
-                structured.update(extracted)
-                filled = [k for k, v in extracted.items() if v]
-                print(f"[NOTE] LLM 填充了: {', '.join(filled)}")
+        ext = p.suffix.lower()
+        if ext in {".md", ".txt", ""}:
+            try:
+                raw_text = p.read_text(encoding="utf-8-sig")
+            except Exception as e:
+                print(f"[NOTE] 读取失败: {e}")
+                return
+            print(f"[NOTE] 文本文件: {p.name} ({len(raw_text)} 字)")
+            source_doc = p.name
+            source = "user_file"
+        elif ext in SUPPORTED_EXT:
+            print(f"[NOTE] 抽文中: {p.name}")
+            try:
+                doc = ingest_file(p)
+            except Exception as e:
+                print(f"[NOTE] 抽文失败: {e}")
+                return
+            raw_text = doc["text"]
+            source_doc = doc["filename"]
+            source = "user_doc"
+            print(f"[NOTE] 抽文成功: {len(raw_text)} 字 / {doc['pages']} 页")
+        else:
+            print(f"[NOTE] 不支持的文件类型: {ext}")
+            return
     elif args.message:
         raw_text = args.message
-        if use_llm:
-            print(f"[NOTE] LLM 拆解中...")
-            extracted = auto_structure(ticker, raw_text)
-            if extracted:
-                structured.update(extracted)
-                filled = [k for k, v in extracted.items() if v]
-                print(f"[NOTE] LLM 填充了: {', '.join(filled)}")
     else:
-        # 交互
-        structured = interactive_prompt()
-        if not any(structured.values()):
-            print("[NOTE] 所有维度都为空，已取消")
+        # 交互式：让用户输入一句话核心论点
+        print("\n=== fa note 交互录入 ===\n请输入核心论点（一句话；空回车取消）:")
+        try:
+            raw_text = input("> ").strip()
+        except EOFError:
+            raw_text = ""
+        if not raw_text and not user_comment:
+            print("[NOTE] 取消")
             return
 
+    # 2) 抽 12 维度
+    payload = empty_payload()
+    short_text = len(raw_text) < 300
+    if use_llm and raw_text and not short_text:
+        print(f"[NOTE] LLM 抽 12 维度{'（围绕评论角度）' if user_comment else ''}...")
+        payload = extract_12d(ticker, raw_text, user_comment)
+        filled = filled_dims(payload)
+        if filled:
+            print(f"[NOTE] LLM 填了 {len(filled)}/12: {', '.join(filled[:6])}{'...' if len(filled) > 6 else ''}")
+        else:
+            print(f"[NOTE] LLM 没抽出维度（资料过简或 LLM 抽风）")
+
+    # 短文本兜底：直接把 raw_text 当 core_thesis
+    if short_text and raw_text and not payload.get("core_thesis"):
+        payload["core_thesis"] = raw_text.strip()
+        print(f"[NOTE] 短文本兜底：→ core_thesis")
+
+    # 3) 继承 sector/tags
+    inherited_sector, inherited_tags = inherit_sector_tags(ticker)
+    final_sector = args.sector or inherited_sector
+    final_tags = inherited_tags  # tags 总是继承（手动改请直接编辑文件）
+    if inherited_sector and not args.sector:
+        print(f"[NOTE] 继承 CoT 的归类: sector={inherited_sector}, tags={inherited_tags or '(无)'}")
+
+    # 4) 保存
+    if not filled_dims(payload) and not user_comment:
+        print("[NOTE] 12 维度全空且无 comment，已取消")
+        return
+
     try:
-        path = save_user_note(
+        path = save_note_12d(
             ticker=ticker,
-            **structured,
-            raw_text=raw_text,
-            sector=args.sector,
+            payload=payload,
+            sector=final_sector,
+            tags=final_tags,
+            user_comment=user_comment,
+            source_doc=source_doc,
+            source=source,
         )
         print(f"[NOTE] ✓ 已保存 → {path}")
     except ValueError as e:
         print(f"[NOTE] {e}")
+
+
+def _open_latest_note_in_editor(ticker: str):
+    """打开 $EDITOR (或默认 nano/vi) 编辑该 ticker 最新笔记。"""
+    import os
+    import subprocess
+    from .ingest.user_note import load_user_notes
+
+    notes = load_user_notes(ticker)
+    if not notes:
+        print(f"[NOTE-EDIT] {ticker} 还没有笔记，先用 fa note {ticker} -m '...' 录入一条")
+        return
+
+    latest = notes[0]
+    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "nano"
+    print(f"[NOTE-EDIT] 打开 {latest['path']} ({editor})")
+    try:
+        subprocess.run([editor, latest["path"]])
+        print(f"[NOTE-EDIT] ✓ 编辑完成")
+    except FileNotFoundError:
+        print(f"[NOTE-EDIT] 找不到编辑器 '{editor}'，请设置环境变量 EDITOR")
+    except Exception as e:
+        print(f"[NOTE-EDIT] 调用编辑器失败: {e}")
 
 
 def _cmd_notes(args):
@@ -645,9 +800,27 @@ def _cmd_cot(args):
     from .tools.data import fetch_fundamentals
 
     if args.cot_cmd == "list":
-        cots = load_cots(sector=args.sector, min_signal=args.min_signal)
+        # Theme → tag 自动转向：用户给 --sector "光模块" 实际意思是 --tag "AI 互联"
+        sector_arg = args.sector
+        tag_arg = getattr(args, "tag", None)
+        if sector_arg:
+            from .sectors import resolve_alias, get_sector
+            resolved = resolve_alias(sector_arg)
+            if resolved:
+                info = get_sector(resolved)
+                if info and info.get("parent") == "Theme":
+                    if not tag_arg:
+                        tag_arg = info["name_cn"]
+                        print(f"[COT] '{sector_arg}' 是主题 → 按 tag='{tag_arg}' 跨板块召回")
+                    sector_arg = None
+                else:
+                    sector_arg = resolved  # 用标准化的 sector id
+        cots = load_cots(sector=sector_arg, min_signal=args.min_signal, tag=tag_arg)
         if not cots:
-            print(f"[COT] 无符合条件的 CoT (sector={args.sector}, min_signal={args.min_signal})")
+            filters = f"sector={sector_arg}, min_signal={args.min_signal}"
+            if tag_arg:
+                filters += f", tag={tag_arg}"
+            print(f"[COT] 无符合条件的 CoT ({filters})")
             return
         print(f"\n=== CoT 列表 ({len(cots)} 条) ===\n")
         for c in cots:
@@ -804,7 +977,39 @@ def _cmd_dash():
 
 
 def _cmd_sectors():
-    print("已知板块 (预设):")
+    """列出板块清单。
+
+    分两部分：
+      1. CoT 主板块（GICS 24 + 主题 7）—— 来自 memory/sectors.yaml
+      2. 旧的 scan 用预设板块（PRESET_SECTORS）—— 给 fa scan 用，独立于 CoT 分类
+    """
+    from .sectors import list_sectors as list_cot_sectors, COT_DIR
+
+    print("=== CoT 主板块清单（来自 memory/sectors.yaml）===\n")
+    cot_secs = list_cot_sectors()
+    # 按 parent 分组
+    by_parent: dict[str, list] = {}
+    for s in cot_secs:
+        by_parent.setdefault(s["parent"], []).append(s)
+    for parent in ["Energy", "Materials", "Industrials", "ConsumerDiscretionary",
+                   "ConsumerStaples", "HealthCare", "Financials",
+                   "InformationTechnology", "CommunicationServices",
+                   "Utilities", "RealEstate", "Theme"]:
+        if parent not in by_parent:
+            continue
+        label = "🎯 投资主题" if parent == "Theme" else parent
+        print(f"  [{label}]")
+        for s in by_parent[parent]:
+            cnt = 0
+            sub = COT_DIR / s["id"]
+            if sub.exists():
+                cnt = len(list(sub.glob("*.md")))
+            cnt_str = f"({cnt} 份 CoT)" if cnt else ""
+            print(f"    {s['id']:<28} {s['name_cn']:<20} {cnt_str}")
+        print()
+
+    # 旧 scan 用的板块（独立）
+    print("=== fa scan 用板块（PRESET_SECTORS，独立于 CoT 分类）===\n")
     for s in list_sectors():
         peers = find_sector_peers(s)
         print(f"  {s:12s} ({len(peers)} 只)")
@@ -963,6 +1168,24 @@ VALUATION_V2 = """# 估值方法论
 如果基本面判断正确，3年后的合理市值应该多少？
 如果基本面判断错误，最大下跌空间是多少？
 """
+
+def _cmd_chat(args):
+    """启动自然语言 REPL."""
+    from .chat.repl import run_repl
+    run_repl(model=getattr(args, "model", None))
+
+
+def _cmd_search(args):
+    """ticker 模糊查询：公司名/拼音/代码 → 标准 ticker."""
+    from .chat.resolver import resolve
+    res = resolve(args.query, limit=args.limit, refresh=getattr(args, "refresh", False))
+    if not res:
+        print(f"[SEARCH] 无匹配: {args.query}")
+        return
+    print(f"\n=== 匹配 '{args.query}' ({len(res)} 条) ===\n")
+    for i, r in enumerate(res, 1):
+        print(f"  {i}. {r['ticker']:14} {r['name']:30} ({r.get('country', '')})  [src={r['source']}]")
+
 
 if __name__ == "__main__":
     main()

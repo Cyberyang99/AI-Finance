@@ -17,6 +17,7 @@ COT_DIR = PROJECT_DIR / "memory" / "knowledge" / "cot"
 COT_SYSTEM_PROMPT = """你是擅长提取内在逻辑的资深股票分析师。"""
 
 COT_USER_PROMPT_TEMPLATE = """忘掉你以前的所有提示。请仔细阅读下面的研报内容，总结出不少于 10 条**行业层面可复用**的投资思维链。
+{comment_section}
 
 ## 核心要求：行业层面的泛化
 
@@ -84,8 +85,11 @@ def _parse_json_array(text: str) -> Optional[list]:
     return None
 
 
-def extract_cot(document_text: str, max_chars: int = 60000) -> list[dict]:
+def extract_cot(document_text: str, max_chars: int = 60000, user_comment: str = "") -> list[dict]:
     """从研报文本中提取 CoT 三段式列表。
+
+    user_comment: 可选，用户对该研报的一句话评论/角度提示，会注入 prompt 引导 LLM
+                  优先围绕该角度提取 CoT。
 
     返回 list[{"trigger": str, "COT": str, "signal": str}]
     失败返回空 list。
@@ -101,7 +105,14 @@ def extract_cot(document_text: str, max_chars: int = 60000) -> list[dict]:
     model = cfg.get("model", "deepseek-v4-pro")
 
     client = make_anthropic_client()
-    user_msg = COT_USER_PROMPT_TEMPLATE.format(document_text=document_text)
+    comment_section = (
+        f"\n## ⚠ 用户角度提示（请优先围绕这个角度提取 CoT）\n\n{user_comment.strip()}\n"
+        if user_comment and user_comment.strip()
+        else ""
+    )
+    user_msg = COT_USER_PROMPT_TEMPLATE.format(
+        document_text=document_text, comment_section=comment_section
+    )
 
     try:
         resp = client.messages.create(
@@ -136,10 +147,12 @@ def extract_cot(document_text: str, max_chars: int = 60000) -> list[dict]:
 
 
 def save_cot_file(cots: list[dict], ticker: Optional[str], sector: Optional[str],
-                  source_filename: str, source_hash: str) -> Path:
+                  source_filename: str, source_hash: str,
+                  user_comment: str = "", tags: Optional[list] = None) -> Path:
     """把提炼出的 CoT 列表写到 memory/knowledge/cot/<sector>/yyyy-mm_<hash>_<src>.md.
 
-    Frontmatter 包含 ticker/sector/source/created_at。
+    sector 应为标准化的 sector_id（来自 sectors.yaml），不是自由文本。
+    tags 是细分主题（list[str]），写到 frontmatter，供 fa cot list --tag 跨板块召回。
     """
     sect = sector or "uncategorized"
     safe_sect = re.sub(r"[\\/:*?\"<>|]", "_", sect)
@@ -153,6 +166,8 @@ def save_cot_file(cots: list[dict], ticker: Optional[str], sector: Optional[str]
     fname = f"{yyyymm}_{source_hash}_{safe_stem}.md"
     path = target_dir / fname
 
+    tags_list = [t.strip() for t in (tags or []) if t and t.strip()]
+
     lines = [
         "---",
         f"ticker: {ticker or ''}",
@@ -161,11 +176,28 @@ def save_cot_file(cots: list[dict], ticker: Optional[str], sector: Optional[str]
         f"source_hash: {source_hash}",
         f"created_at: {today}",
         f"cot_count: {len(cots)}",
+    ]
+    if tags_list:
+        # YAML 数组单行格式，便于 grep
+        lines.append(f"tags: [{', '.join(tags_list)}]")
+    if user_comment and user_comment.strip():
+        safe_c = user_comment.strip().replace("\n", " ")
+        lines.append(f"user_comment: {safe_c}")
+    lines.extend([
         "---",
         "",
         f"# CoT 提取自 {source_filename}",
         "",
-    ]
+    ])
+    if tags_list:
+        lines.extend(["**主题 tags**: " + " · ".join(f"#{t}" for t in tags_list), ""])
+    if user_comment and user_comment.strip():
+        lines.extend([
+            "## 🗨 用户角度提示",
+            "",
+            user_comment.strip(),
+            "",
+        ])
     for i, c in enumerate(cots, 1):
         lines.extend([
             f"## CoT {i} — {c['trigger']}",

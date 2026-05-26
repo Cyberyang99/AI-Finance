@@ -1,0 +1,322 @@
+# fa CoT 主板块清单
+#
+# 设计：
+#   - 31 个主板块 = GICS 11×2 共 24 个 industry group + 7 个中国/全球特色主题
+#   - 每个 sector 有 id（英文，目录名）、name_cn（中文显示）、parent（GICS 一级或 Theme）、aliases（同义词）
+#   - aliases 用于 fa 解析用户/LLM 输入：模糊匹配命中后归一到这个标准 id
+#
+# 修改约定：
+#   1. id 是目录名，一旦写了就别改（会让旧 CoT 文件错位）。要改 id 等于"重命名板块"，需要迁移
+#   2. aliases 可以随时增删
+#   3. 想新增板块：直接加一节，重启 fa 即可生效
+#
+# 一级行业 = parent，二级 = sector（实际归类到这一级）
+
+version: 1
+
+sectors:
+  # ── GICS Energy ──
+  Energy:
+    name_cn: 能源
+    parent: Energy
+    aliases: [能源, 油气, 石油, oil_gas, oil, gas, petroleum, 油气勘探]
+    desc: 油气勘探与开采、石油设备与服务
+
+  # ── GICS Materials ──
+  Materials:
+    name_cn: 原材料
+    parent: Materials
+    aliases: [原材料, 化工, 化学品, 钢铁, 有色金属, 建材, 金属采矿, materials, 纸品包装]
+    desc: 化工、建材、金属采矿、纸品包装
+
+  # ── GICS Industrials (3 个 industry group) ──
+  CapitalGoods:
+    name_cn: 资本品
+    parent: Industrials
+    aliases: [资本品, 机械, 工业机械, 电气设备, 建筑工程, capital_goods, 装备制造, 航空航天, 国防, 模具, 工程机械, 重工]
+    desc: 工业机械、电气设备、航空航天与国防、建筑产品、模具
+
+  CommercialServices:
+    name_cn: 商业与专业服务
+    parent: Industrials
+    aliases: [商业服务, 专业服务, 人力资源, 安保, 咨询, commercial_services]
+    desc: 人力资源、研究咨询、安保、办公服务
+
+  Transportation:
+    name_cn: 运输
+    parent: Industrials
+    aliases: [运输, 物流, 航空运输, 航运, 海运, 陆运, transportation, logistics, 快递, 港口, 机场, 高速公路]
+    desc: 航空、海运、陆运、物流、机场港口、快递
+
+  # ── GICS Consumer Discretionary (4 个 industry group) ──
+  AutosAndComponents:
+    name_cn: 汽车与零部件
+    parent: ConsumerDiscretionary
+    aliases: [汽车, 新能源汽车, 电动车, 整车, 零部件, NEV, autos, automobiles, 智能驾驶, 智能座舱, 汽车电子]
+    desc: 整车、零部件、新能源汽车、智能化电子
+
+  ConsumerDurables:
+    name_cn: 耐用消费品与服装
+    parent: ConsumerDiscretionary
+    aliases: [耐用消费品, 家电, 服装, 家居, 奢侈品, durables, apparel, 白色家电, 厨电, 纺织, 家具]
+    desc: 家用电器、家具、纺织服装、奢侈品
+
+  ConsumerServices:
+    name_cn: 消费服务
+    parent: ConsumerDiscretionary
+    aliases: [消费服务, 餐饮, 酒店, 旅游, 教育, consumer_services, 免税, 景区]
+    desc: 餐饮、酒店、旅游、教育、博彩、休闲
+
+  Retailing:
+    name_cn: 零售
+    parent: ConsumerDiscretionary
+    aliases: [零售, 电商, 电子商务, 互联网零售, retailing, ecommerce, 百货, 超市]
+    desc: 电商、专业零售、综合零售
+
+  # ── GICS Consumer Staples (3 个 industry group) ──
+  FoodStaplesRetailing:
+    name_cn: 必需消费品零售
+    parent: ConsumerStaples
+    aliases: [必需消费零售, 超市, 卖场, food_staples_retailing, 食品分销]
+    desc: 食品分销、大众零售（超市/便利店）
+
+  FoodBeverageTobacco:
+    name_cn: 食品饮料烟草
+    parent: ConsumerStaples
+    aliases: [食品饮料, 白酒, 啤酒, 调味品, 乳制品, 食饮, 烟草, food, beverage, tobacco, 软饮料]
+    desc: 食品、饮料、烟草
+
+  HouseholdProducts:
+    name_cn: 家庭与个人用品
+    parent: ConsumerStaples
+    aliases: [日用品, 化妆品, 个护, 家庭用品, household, personal_care, 美妆]
+    desc: 化妆品、个护、家庭日用品
+
+  # ── GICS Health Care (2 个 industry group) ──
+  HealthCareEquipment:
+    name_cn: 医疗设备与服务
+    parent: HealthCare
+    aliases: [医疗设备, 医疗服务, 医院, 体外诊断, IVD, healthcare_equipment, 医美, 眼科, 牙科, 影像设备]
+    desc: 医疗设备、医疗服务、IVD、医美
+
+  Pharmaceuticals:
+    name_cn: 制药与生物科技
+    parent: HealthCare
+    aliases: [制药, 创新药, 生物科技, biotech, pharmaceuticals, 中药, CDMO, CXO, 仿制药, 疫苗]
+    desc: 制药、生物科技、CXO、中药
+
+  # ── GICS Financials (3 个 industry group) ──
+  Banks:
+    name_cn: 银行
+    parent: Financials
+    aliases: [银行, banks, 国有大行, 股份行, 城商行, 农商行]
+
+  DiversifiedFinancials:
+    name_cn: 综合金融
+    parent: Financials
+    aliases: [证券, 券商, 资管, 金融控股, 信托, diversified_financials, brokerage, 期货, 投资银行, 财富管理]
+
+  Insurance:
+    name_cn: 保险
+    parent: Financials
+    aliases: [保险, 寿险, 财险, insurance, 再保险]
+
+  # ── GICS Information Technology (3 个 industry group) ──
+  SoftwareServices:
+    name_cn: 软件与服务
+    parent: InformationTechnology
+    aliases: [软件, IT服务, SaaS, 云计算, software, AI软件, 应用软件, 系统软件, 大模型, ToB软件, 数据服务, IT服务]
+    desc: 软件、SaaS、云计算、IT 服务（含大模型 / AI 应用类）
+
+  TechHardware:
+    name_cn: 硬件与设备
+    parent: InformationTechnology
+    aliases: [硬件, 通信设备, 服务器, 网络设备, hardware, 消费电子, 工控, 交换机, 路由器, PCB]
+    desc: 通信设备、服务器、消费电子、工控、PCB 等（注：光模块/CPO 等 AI 互联产品归 Theme_AIInterconnect 主题）
+
+  Semiconductors:
+    name_cn: 半导体
+    parent: InformationTechnology
+    aliases: [半导体, 芯片, 晶圆, 设计, 制造, 封测, semiconductors, IC, 模拟芯片, 设备材料]
+    desc: 通用半导体（设计、制造、封测、设备材料）。注：AI 算力芯片 (GPU/NPU/ASIC) 归 Theme_AIChip，存储芯片 (HBM/DDR/NAND) 归 Theme_AIStorage
+
+  # ── GICS Communication Services (2 个 industry group) ──
+  TelecomServices:
+    name_cn: 电信服务
+    parent: CommunicationServices
+    aliases: [电信运营商, 通信运营, telecom, 三大运营商, 中国移动, 中国联通, 中国电信]
+
+  MediaEntertainment:
+    name_cn: 媒体与娱乐
+    parent: CommunicationServices
+    aliases: [媒体, 游戏, 视频, 互联网, 社交, 直播, media, entertainment, 互动娱乐, 短视频, 长视频, 流媒体]
+    desc: 互联网、游戏、视频、社交、直播
+
+  # ── GICS Utilities ──
+  Utilities:
+    name_cn: 公用事业
+    parent: Utilities
+    aliases: [公用事业, 电力, 燃气, 水务, utilities, 火电, 水电, 核电, 风电运营, 光伏运营, 电网, 储能电站]
+    desc: 电力（火/水/核/风/光运营）、燃气、水务、储能电站
+
+  # ── GICS Real Estate ──
+  RealEstate:
+    name_cn: 房地产
+    parent: RealEstate
+    aliases: [房地产, 物业, REITs, real_estate, 商业地产, 住宅开发, 物业管理]
+
+  # ── 投资主题 (10 大用户研究主题) ──
+  # 设计：每个主题颗粒度比 GICS 二级更细，专门反映投资视角；可多选。
+  # 强制 LLM 选具体细分（如 AI 算力/存储/互联/大模型），不留"AI 总主题"粗匣。
+
+  Theme_AIChip:
+    name_cn: AI 算力
+    parent: Theme
+    # 边界：服务器内部除"存储"和"互联"之外的全部产业链 = 算力
+    # 含：芯片（GPU/NPU/CPU/...）+ 板级（主板/电源）+ 封装 + Foundry + 设备 + 材料 + EDA/IP
+    aliases: [
+      # ── 算力芯片（按种类）──
+      AI算力, AI 算力, 算力, AI芯片, 算力芯片, 算力卡, AI加速卡, AI Chip, AI Accelerator,
+      GPU, NPU, CPU, TPU, LPU, DPU, FPGA, ASIC, 服务器CPU, 训练芯片, 推理芯片, AI训练, AI推理,
+      SRAM, 寄存器, on-chip cache, L3 cache,
+      # ── 具体型号 ──
+      H100, H200, B100, B200, B300, GB200, GB300, MI300, MI350, MI355, Blackwell, Hopper, Rubin,
+      # ── 先进封装 ──
+      CoWoS, SoIC, Chiplet, 先进封装, 2.5D封装, 3D封装, FOPLP, FOWLP, FCBGA, FOCoS, HBM封装,
+      日月光, 长电科技, 通富微电, Amkor, JCET,
+      # ── Foundry 晶圆代工 ──
+      Foundry, FAB, 晶圆代工, TSMC, 台积电, SMIC, 中芯国际, 三星代工, Samsung Foundry, Intel Foundry, GlobalFoundries, GF, UMC, 联电, 华虹, 力积电, Tower Semi,
+      7nm, 5nm, 3nm, 2nm, 18A, 14A, 先进制程, A16,
+      # ── 半导体设备 ──
+      光刻机, EUV, High-NA EUV, ASML, 应用材料, AMAT, Lam Research, 拉姆研究, 东京电子, TEL, KLA, 科林研发,
+      中微公司, 北方华创, 拓荆科技, 盛美上海, 沪硅产业, 长川科技, 华峰测控, 万业企业, 中科飞测, 至纯科技,
+      检测设备, 刻蚀机, CVD, PVD, ALD, CMP, 离子注入, 清洗设备, 涂胶显影, 量测,
+      # ── 半导体材料 ──
+      光刻胶, 硅片, 大硅片, 12寸硅片, 12寸晶圆, CMP抛光垫, CMP抛光液, 靶材, 溅射靶材,
+      电子特气, 湿化学品, 高纯试剂, 掩模版, 光罩, 封装基板, ABF载板, ABF, BT载板,
+      信越化学, JSR, 东京应化, TOK, 杜邦, 沪硅, 立昂微, 安集科技, 鼎龙股份, 雅克科技, 江丰电子, 阿石创, 兴森科技, 深南电路,
+      # ── EDA / IP ──
+      EDA, Synopsys, 新思科技, Cadence, 楷登, Siemens EDA, 华大九天, 概伦电子, 广立微, 国微集团,
+      ARM, RISC-V, IP核, 半导体IP,
+      # ── 服务器板级 ──
+      服务器主板, GPU板, AI服务器, 训练服务器, 推理服务器, AI加速服务器, NVL36, NVL72,
+      VRM, PMIC, 电源管理芯片, 板载电源, MLCC, 多层陶瓷电容,
+      服务器PCB, GPU PCB, 高多层PCB, HDI, M9等级, M8等级
+    ]
+    desc: 服务器内部除存储/互联以外的全部产业链 — 算力芯片 + 板级 + 先进封装 + Foundry + 设备 + 材料 + EDA/IP
+
+  Theme_AIStorage:
+    name_cn: AI 存储
+    parent: Theme
+    aliases: [
+      # ── 主存芯片 ──
+      AI存储, AI 存储, 存力, AI内存, 存储芯片, 内存,
+      HBM, HBM3, HBM3E, HBM4, HBM4E, 高带宽存储, 高带宽内存,
+      DRAM, DDR4, DDR5, DDR6, LPDDR, GDDR, GDDR7,
+      # ── 固态存储 ──
+      SSD, NAND, 3D NAND, eSSD, NVMe, PCIe SSD, 企业级SSD, QLC, TLC, SLC,
+      # ── 存储厂商 ──
+      海力士, SK Hynix, SKHynix, 美光, Micron, 三星电子存储, Samsung Memory, 三星存储,
+      长江存储, YMTC, CXMT, 长鑫存储, 西部数据, Western Digital, WD, Kioxia, 铠侠, Solidigm,
+      # ── 新型存储 ──
+      MRAM, PCM, ReRAM, 相变存储, 相变存储器, 自旋存储,
+      # ── 国内模组/相关 ──
+      江波龙, 北京君正, 兆易创新, 澜起科技, 聚辰股份, 普冉股份
+    ]
+    desc: 服务 AI 训练 / 推理的存储产品（HBM、DRAM、SSD、NAND、新型存储）
+
+  Theme_AIInterconnect:
+    name_cn: AI 互联
+    parent: Theme
+    aliases: [
+      # ── 光通信 ──
+      AI互联, AI 互联, AI网络, 光模块, 光通信, 光器件, 硅光, 光芯片,
+      800G, 1.6T, 3.2T, CPO, OIO, LPO, 光引擎, EML, VCSEL, DFB, OSFP, QSFP-DD, MPO,
+      光合分波器, AWG, 光分路器,
+      # ── 网络/交换芯片 ──
+      交换芯片, Tomahawk, Spectrum, Spectrum-X, Tofino, 博通交换芯片, Broadcom Switch,
+      NVSwitch, NVLink, NVLink Fusion, NVL72, NVL36,
+      网络设备, 交换机, 路由器, AI交换机,
+      # ── 互联协议 ──
+      PCIe, PCIe 5, PCIe 6, PCIe Gen5, PCIe Gen6,
+      CXL, Compute Express Link,
+      InfiniBand, IB, RoCE, Ethernet, UEC, UALink, Ultra Accelerator Link,
+      # ── 铜互联/SerDes ──
+      铜连缆, DAC, ACC, AEC, 224G, 224G SerDes, 高速铜缆, 高速连接器,
+      # ── Scale-Up / Scale-Out ──
+      Scale Up, ScaleUp, Scale Out, ScaleOut, 集群互联, 千卡, 万卡, 十万卡, GPU集群, 超节点, SuperPod,
+      # ── 国内厂商 ──
+      中际旭创, 新易盛, 天孚通信, 光迅科技, 太辰光, 华工科技, 源杰科技, 仕佳光子, 长光华芯, 联特科技,
+      博通, Broadcom, Marvell, 思科, Cisco, Arista, 锐捷网络
+    ]
+    desc: AI 集群内 / 间高速互联 — 光模块、CPO、交换芯片、网络协议、Scale-Up/Out
+
+  Theme_PowerEnergy:
+    name_cn: 电力能源及设备
+    parent: Theme
+    aliases: [电力能源, 电力, 能源, 燃气轮机, 燃机, 储能, 核电, AIDC, 数据中心电力, 数据中心, 电力设备, 输配电, 智能电网, 配电, 风电, 光伏, 固态电池, 半固态, 锂电池, solid_state_battery, AIDC供电, 液冷, 冷板, CDU, UPS, 机柜, 散热, 重型燃机]
+    desc: AI / 工业拉动的电力供给（发电、输配电、储能、电力设备、电池、机房散热设施）
+
+  Theme_AICloudLLM:
+    name_cn: AI 大模型与云
+    parent: Theme
+    aliases: [
+      # ── 大模型公司 (海外) ──
+      OpenAI, Anthropic, Google DeepMind, DeepMind, xAI, Meta AI, Mistral, Cohere,
+      # ── 大模型公司 (中国) ──
+      DeepSeek, 智谱, GLM, 月之暗面, Kimi, MiniMax, Minimax, 阿里通义, 通义, 百度文心, 文心一言, 字节豆包, 豆包, 腾讯混元, 混元, 商汤日日新, 百川, 零一万物, 阶跃星辰,
+      # ── 模型 / 产品 ──
+      LLM, 大模型, 大语言模型, AI大模型, AI 大模型,
+      GPT, GPT-5, Claude, Gemini, Llama, Qwen, ERNIE, Doubao, Kimi K2, GLM-5, Sora, Veo,
+      多模态, 视频生成, 文生图, GenAI, 生成式AI, AGI, ASI, 通用人工智能,
+      # ── AI 云 / MaaS ──
+      AI云, MaaS, 云计算, 公有云, 私有云, GPU云, IaaS, PaaS,
+      Azure, AWS, GCP, OCI, Oracle Cloud,
+      阿里云, 腾讯云, 百度云, 火山引擎, 字节火山, 华为云, 京东云,
+      OpenRouter, Together, Fireworks, Groq Cloud, Cerebras Cloud,
+      # ── AI 应用层 ──
+      AI应用, AI软件, ToB大模型, ToB AI, AI Agent, AI助理, AI助手,
+      AI Coding, AI编程, Cursor, Claude Code, Copilot, GitHub Copilot, Windsurf, Devin, Cline, Bolt,
+      AI Search, Perplexity, SearchGPT,
+      AI视频, AI图片, 文生视频,
+      # ── Agent 协议 / 框架 ──
+      MCP, Model Context Protocol, A2A, AutoGen, LangChain, LangGraph, LlamaIndex,
+      # ── 应用厂商 (国内 SaaS / AI) ──
+      金山办公, 福昕, 拓尔思, 万兴科技, 同花顺AI, 科大讯飞, 商汤
+    ]
+    desc: 大模型公司、AI 云服务、AI 应用软件、Agent 框架
+
+  Theme_Robotics:
+    name_cn: 机器人
+    parent: Theme
+    aliases: [机器人, 人形机器人, humanoid, 工业机器人, 协作机器人, 具身智能, embodied_ai, 机械臂, 灵巧手, Optimus, Figure, robotics]
+    desc: 人形 / 工业 / 协作机器人 + 具身智能
+
+  Theme_Space:
+    name_cn: 太空 / 低空
+    parent: Theme
+    aliases: [太空, 商业航天, 卫星, 火箭, 低轨卫星, 通信卫星, 星链, SpaceX, space, 航天科技, 低空经济, eVTOL, 通航, 无人机, 飞行汽车, low_altitude]
+    desc: 商业航天、卫星互联网、火箭，以及低空经济 (eVTOL / 无人机)
+
+  Theme_Quantum:
+    name_cn: 量子
+    parent: Theme
+    aliases: [量子, 量子计算, 量子通信, 量子加密, quantum, 量子科技, 量子比特]
+
+  Theme_BioMedical:
+    name_cn: 生物医药
+    parent: Theme
+    aliases: [生物医药, 创新药出海, BD, license_out, AI制药, CXO, 创新药主题, 生物科技主题, biotech_theme, ADC, GLP-1, mRNA, 基因编辑]
+    desc: 创新药出海、AI 制药、生物科技投资视角 (与 GICS Pharmaceuticals 互补)
+
+  Theme_Crypto:
+    name_cn: 加密货币
+    parent: Theme
+    aliases: [加密货币, 比特币, BTC, 以太坊, ETH, 区块链, web3, crypto, 稳定币, USDT, USDC, 矿机, 矿场, 数字资产, DeFi]
+    desc: 加密资产、稳定币、矿机、区块链基础设施
+
+# 同义词 fallback（自由文本里出现的、aliases 里没的，靠这个表兜底）
+# 仅当用户输入完整短语命中时强制归到对应 sector_id
+keyword_fallback:
+  "AI-数据中心-电力-燃气轮机": CapitalGoods
+  "AIDC": Utilities
