@@ -68,6 +68,11 @@ def main():
     pe = sub.add_parser("evolve", help="进化分析")
     pe.add_argument("--apply", type=int, help="执行指定编号的框架更新建议")
 
+    # review2 (12d 结构化复盘)
+    pr2 = sub.add_parser("review2", help="基于 12d note frontmatter 的结构化复盘 (单股)")
+    pr2.add_argument("ticker", help="股票代码")
+    pr2.add_argument("--no-llm", action="store_true", help="跳过 LLM 归因（省 API 费）")
+
     # critique
     pc = sub.add_parser("critique", help="查看某只股票最近一次 Critic 评审")
     pc.add_argument("ticker", help="股票代码")
@@ -117,6 +122,8 @@ def main():
                     help="跳过 LLM 拆解，原文直接进 raw_text 段")
     pn.add_argument("--edit", action="store_true",
                     help="打开 $EDITOR 编辑该 ticker 最新一条笔记")
+    pn.add_argument("--append", action="store_true",
+                    help="同日 note 已存在时追加到末尾而非覆盖（不重抽 12 维度，原文 + comment 直接附加）")
 
     # notes
     pln = sub.add_parser("notes", help="列出用户论点")
@@ -202,6 +209,8 @@ def main():
         _cmd_review(args)
     elif args.cmd == "evolve":
         _cmd_evolve(args)
+    elif args.cmd == "review2":
+        _cmd_review2(args)
     elif args.cmd == "critique":
         _cmd_critique(args)
     elif args.cmd == "reflect":
@@ -260,6 +269,11 @@ def _cmd_review(args):
 def _cmd_evolve(args):
     from .agent import do_evolve
     do_evolve(apply_index=args.apply)
+
+
+def _cmd_review2(args):
+    from .review_v2 import do_review_v2
+    do_review_v2(args.ticker, skip_llm=args.no_llm)
 
 
 def _cmd_critique(args):
@@ -717,6 +731,7 @@ def _cmd_note(args):
 
     use_llm = not getattr(args, "no_structure", False)
     user_comment = (args.comment or "").strip() if getattr(args, "comment", None) else ""
+    append_mode = bool(getattr(args, "append", False))
 
     # 1) 获取 raw_text + source_doc
     raw_text = ""
@@ -764,6 +779,16 @@ def _cmd_note(args):
         if not raw_text and not user_comment:
             print("[NOTE] 取消")
             return
+
+    # 1.5) --append 模式：当日有 note 就直接追加文本，不重抽 12 维度
+    if append_mode:
+        from .ingest import append_to_today_note
+        appended = append_to_today_note(ticker, raw_text=raw_text, user_comment=user_comment)
+        if appended:
+            print(f"[NOTE] ✓ 追加到 → {appended}")
+            return
+        else:
+            print(f"[NOTE] --append 指定但当日无 note，回退到正常新建流程")
 
     # 2) 抽 12 维度
     payload = empty_payload()

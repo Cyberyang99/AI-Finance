@@ -401,6 +401,32 @@ def save_note_12d(
     return path
 
 
+def append_to_today_note(ticker: str, raw_text: str = "", user_comment: str = "") -> Optional[Path]:
+    """如果当日已有 note，追加 raw_text + comment 到末尾；否则返回 None。
+
+    用于 fa note --append：同日多次写不覆盖，按时间戳追加段落。frontmatter 不动。
+    """
+    if not raw_text.strip() and not user_comment.strip():
+        return None
+    t = _safe_ticker(ticker)
+    today = date.today().isoformat()
+    path = USER_THESES_DIR / f"{t}_{today}.md"
+    if not path.exists():
+        return None
+
+    from datetime import datetime as _dt
+    now = _dt.now().strftime("%H:%M")
+    existing = path.read_text(encoding="utf-8")
+    parts = ["", "", "---", "", f"## 追加 ({now})", ""]
+    if user_comment.strip():
+        parts.extend([f"_角度提示_: {user_comment.strip()}", ""])
+    if raw_text.strip():
+        parts.append(raw_text.strip())
+        parts.append("")
+    path.write_text(existing + "\n".join(parts), encoding="utf-8")
+    return path
+
+
 def inherit_sector_tags(ticker: str) -> tuple[Optional[str], list]:
     """从该 ticker 已有的 CoT 文件读取 sector + tags，用于 note 继承。
 

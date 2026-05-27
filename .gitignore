@@ -22,6 +22,9 @@ memory/raw/
 memory/theses/user/
 memory/knowledge/cot/
 
+# review_v2 复盘报告（含 ticker + 用户预测细节）
+memory/reviews/
+
 # 情境笔记（含 source_thesis 字段会暴露研究标的；想跨机同步用 git add -f）
 memory/situations/*.md
 !memory/situations/MEMORY.md.example

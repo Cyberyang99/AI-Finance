@@ -589,7 +589,42 @@ TOOLS_SPEC = [
         "description": "列出已知板块/主题。",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
+    {
+        "name": "reclassify_cot",
+        "description": ("改 CoT 文件的归类（sector 一级 + tags 二级）。当用户说'把豪迈那份重新归到 X 板块'"
+                        "或'给那个 CoT 加上 AI 算力 tag' 时用。query 可以是文件名片段 / source_hash 前缀 /"
+                        "公司名（用于定位文件）。new_sector 或 new_tags 至少给一个。"),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "文件名片段 / source_hash 前缀 / ticker 字符等用于定位文件"},
+                "new_sector": {"type": "string", "description": "新的 GICS sector，可空"},
+                "new_tags": {"type": "array", "items": {"type": "string"}, "description": "新的主题 tags 列表，可空（不传则不改）"},
+            },
+            "required": ["query"],
+        },
+    },
 ]
+
+
+def _do_reclassify_cot(args: dict, state: dict) -> str:
+    from ..cot.local_ops import reclassify_file
+    query = args.get("query") or ""
+    new_sector = args.get("new_sector") or None
+    new_tags = args.get("new_tags")
+    if new_tags is not None and not isinstance(new_tags, list):
+        return "工具参数错误：new_tags 必须是字符串数组"
+    res = reclassify_file(query, new_sector=new_sector, new_tags=new_tags)
+    if "error" in res:
+        return f"✗ {res['error']}"
+    lines = [f"✓ 已改 → {res['file']}"]
+    if res["moved"]:
+        lines.append(f"  目录: {res['old_sector']} → {res['new_sector']}")
+    elif new_sector:
+        lines.append(f"  sector: {res['old_sector']} → {res['new_sector']} (同板块，未搬目录)")
+    if new_tags is not None:
+        lines.append(f"  tags: {res['old_tags']} → {res['new_tags']}")
+    return "\n".join(lines)
 
 
 HANDLERS: dict[str, Callable[[dict, dict], str]] = {
@@ -603,6 +638,7 @@ HANDLERS: dict[str, Callable[[dict, dict], str]] = {
     "status": _do_status,
     "dashboard": _do_dash,
     "list_sectors": _do_sectors,
+    "reclassify_cot": _do_reclassify_cot,
 }
 
 

@@ -202,19 +202,49 @@ fa config                           # 看配置
 
 ## 🛠 TODO（v2.1 之后待做 — 按优先级）
 
-### P1：review 严谨化（最有价值的下一步）
+### P1：review 严谨化 ✅ (2026-05-27 落地)
 
-12 维度 note 现在把所有预测都结构化了（`financial_forecast` / `valuation_target` / `catalysts` / `long_term_space`），但 `fa review` 还在用旧逻辑。需要新写 `fa/review_v2.py`：
+12 维度 note 的结构化预测现在可以对照实际数据自动复盘。
 
-- [ ] 从 note frontmatter 读 `financial_forecast` JSON
-- [ ] 拉 EODHD 实际财报（quarterly + annual）+ akshare 兜底 A 股分业务拆分
-- [ ] 逐项比对：预测收入 vs 实际、预测净利率 vs 实际、分业务 vs 分业务
-- [ ] 拉股价（EODHD historical），跟 `valuation_target.base.mcap_yi` 对照
-- [ ] `catalysts` 到期检查：到了 `window` 时间窗口，标记"已发生 / 未发生 / 不可判断"
-- [ ] 输出复盘报告：每项一行，准确率打分 + 误差原因（LLM 辅助归因）
-- [ ] 报告写到 `memory/reviews/<ticker>_<date>_v2.md`
+**已完成**：
+- ✅ `fa/review_v2.py` — 读 12d frontmatter 四个 JSON 字段
+- ✅ `compare_financial` — EODHD 年报 totalRevenue / netIncome / 派生 net_margin 对照，±15% 容差
+- ✅ `compare_valuation` — 当前股价 × SharesOutstanding 算市值，对 base/bull/bear 三档定位
+- ✅ `check_catalysts` — 解析 2026Q3 / 2026H1 / 2026-2027 等 window 字符串，标 已到期 / 未到期 / 无窗口
+- ✅ `_attribute_errors` — LLM 归因（overall_bias + items + next_steps）
+- ✅ 报告输出到 `memory/reviews/<ticker>_<date>_v2.md`
+- ✅ CLI: `fa review2 <ticker> [--no-llm]`
 
-预计 3-4 小时。需求触发点：累积了 5-10 份 12 维度 note 之后。
+**已知简化（v2 待跟进）**：
+- 财务对照只到年度 totalRevenue / netIncome 层，未拆 by_segment（需要 akshare A 股分业务，再加一步）
+- 催化剂只做窗口期检查，未判"事件是否真发生"（需要拉新闻或 LLM 联网，下个版本）
+- 季度对照未做（fetch_fundamentals 只暴露年度 series）
+
+### P1.5：复盘补 financial_quality + falsification + risks ✅ (2026-05-27 落地)
+
+review_v2 在量化 4 维度之外，加入 3 个文本维度的 LLM 对照，复盘从"看数字"升级到"查反证"。
+
+**已完成**：
+- ✅ `check_financial_quality` — 用户写的财务质地文本 vs EODHD 实际指标（净利率/毛利率/ROE/OCF/FCF/股息率），输出"吻合/偏离/未提及/不可判断"
+- ✅ `check_conditions_llm` — 通用条件检查函数，falsification 和 risks 共用，逐条标"已触发/未触发/不可判断" + evidence
+- ✅ `extract_section` — 从 note body 抽 Section 6/11/12 纯文本
+- ✅ 报告新增三段（财务质地对照 / 反证检查 / 风险检查 + 表格/列表格式 + 触发图标）
+- ✅ `--no-llm` flag 跳过所有 LLM 调用
+
+**实测局限（v2 暴露）**：
+- 反证 / 风险里需要"分业务季度增速"、"管理层动态"、"行业市占率变化"等数据时，EODHD 不暴露 → LLM 全标"不可判断"
+- 含义：纯财务可判断的条件（如毛利率下降）能闭环，其余仍需外部数据源
+
+### P1.6：定性维度的"软复盘"（待做）
+
+12 维度里剩 5 个纯定性维度（# 1 core_thesis, 2 business_breakdown, 3 market_position, 4 moat, 5 management_governance）还没复盘逻辑。需要外部数据源支持：
+
+- [ ] 数据源调研：EODHD News API 是否够用 / akshare 公告流稳定性
+- [ ] 写 `fetch_recent_news(ticker, days=90)` 拉最近 N 天公告/新闻
+- [ ] 给每个定性维度 LLM 一个 prompt："读最新 X 条公告，判断该 thesis 是否仍成立 / 部分动摇 / 已被证伪"
+- [ ] 报告增加"定性维度复盘"段
+
+预计 4-6 小时，但前置依赖：先评估数据源质量。建议用现版本 2-3 周积累 review 经验后再决策。
 
 ### P2：行业特化模板
 
@@ -236,14 +266,12 @@ fa config                           # 看配置
 
 预计 1 小时。
 
-### P4：交互体验小改进
+### P4：交互体验小改进 ✅ (2026-05-27 落地)
 
-- [ ] `fa chat` 加 `/confirm on|off` 切换 yolo / 逐步确认模式（当前默认 yolo）
-- [ ] `fa chat` 加 `reclassify_cot(file, new_sector, new_tags)` 工具：自然语言改 CoT 归类
-- [ ] `fa note --append`：同日多次写 note 时合并而不是覆盖
-- [ ] 长任务 Ctrl-C 优雅打断（当前会终止整个 chat）
-
-预计 2 小时（合计）。
+- ✅ `fa chat` 加 `/confirm on|off` 切换 yolo / 逐步确认模式（默认 off = yolo）
+- ✅ `fa chat` 加 `reclassify_cot(query, new_sector, new_tags)` 工具，核心逻辑放在 `fa/cot/local_ops.reclassify_file`，sector 变更自动搬目录
+- ✅ `fa note --append`：同日 note 已存在时按时间戳追加段落（不重抽 12 维度），fallback 到正常新建
+- ✅ chat 长任务 Ctrl-C 优雅打断：工具执行中捕获 KeyboardInterrupt 不终止 session；输入提示符按一次只取消输入，连按两次或 /quit 才退出
 
 ### P5：可视化（最远期）
 

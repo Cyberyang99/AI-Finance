@@ -130,6 +130,57 @@ def write_cots_to_file(fp: Path, fm: dict, cots: list[dict], extra_header: str =
     fp.write_text("\n".join(lines), encoding="utf-8")
 
 
+def reclassify_file(query: str, new_sector: Optional[str] = None,
+                    new_tags: Optional[list[str]] = None) -> dict:
+    """改 CoT 文件归类：sector + tags，必要时搬目录。
+
+    new_sector / new_tags 至少给一个；空值不改。
+    返回 {"file": str, "moved": bool, "old_sector": str, "new_sector": str,
+          "old_tags": list, "new_tags": list}
+    """
+    fp = find_cot_file(query)
+    if not fp:
+        return {"error": f"找不到匹配的 CoT 文件: {query}"}
+    if not new_sector and not new_tags:
+        return {"error": "至少要给 new_sector 或 new_tags 之一"}
+
+    fm, cots = load_file_cots(fp)
+    old_sector = fm.get("sector", "")
+    old_tags_str = fm.get("tags", "")
+    old_tags = _parse_tags(old_tags_str)
+
+    if new_sector:
+        fm["sector"] = new_sector
+    if new_tags is not None:
+        fm["tags"] = "[" + ", ".join(new_tags) + "]" if new_tags else ""
+
+    write_cots_to_file(fp, fm, cots)
+
+    moved = False
+    final_path = fp
+    if new_sector and new_sector != old_sector:
+        target_dir = COT_DIR / new_sector
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / fp.name
+        if target.exists() and target.resolve() != fp.resolve():
+            return {
+                "error": f"目标已存在: {target}（未移动，请先处理冲突）",
+                "file": str(fp),
+            }
+        fp.rename(target)
+        final_path = target
+        moved = True
+
+    return {
+        "file": str(final_path),
+        "moved": moved,
+        "old_sector": old_sector,
+        "new_sector": new_sector or old_sector,
+        "old_tags": old_tags,
+        "new_tags": new_tags if new_tags is not None else old_tags,
+    }
+
+
 def regroup_file(fp: Path, dry_run: bool = False) -> dict:
     """对单文件做本地重组（合并同义 + 拆分混合）。
 

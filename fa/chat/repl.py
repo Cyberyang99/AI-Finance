@@ -84,10 +84,33 @@ HELP_TEXT = """\
   看一下 AI 板块的 CoT
 
 特殊命令：
-  /reset     清空对话历史和状态
-  /state     查看当前会话状态
-  /quit      退出 (或按 Ctrl-D)
+  /reset       清空对话历史和状态
+  /state       查看当前会话状态
+  /confirm on  开启逐步确认：每次工具调用前 y/n 确认
+  /confirm off 关闭逐步确认（默认 yolo 模式）
+  /quit        退出 (或按 Ctrl-D)
+
+Ctrl-C 行为：
+  - 输入提示符时按 Ctrl-C：取消当前输入，回到提示符（连按两次或 /quit 退出）
+  - 工具执行中按 Ctrl-C：中断当前工具，保留会话继续聊
 """
+
+
+def _confirm_tool_call(name: str, inp: dict) -> str:
+    """逐步确认模式下，工具调用前问用户。返回 'y' 执行 / 'n' 跳过 / 'q' 取消整轮。"""
+    while True:
+        try:
+            ans = input(f"  ▶ 执行 {name}? [Y/n/q=取消整轮] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  → 已取消")
+            return "q"
+        if ans in ("", "y", "yes"):
+            return "y"
+        if ans in ("n", "no"):
+            return "n"
+        if ans in ("q", "quit"):
+            return "q"
+        print("  请输入 y / n / q")
 
 
 def run_repl(model: str | None = None, max_iterations: int = 6):
@@ -110,15 +133,24 @@ def run_repl(model: str | None = None, max_iterations: int = 6):
     print("  输入 /help 查看用法，/quit 退出（或 Ctrl-D）")
     print("=" * 60)
 
-    state: dict = {}
+    state: dict = {"confirm_mode": False}
     messages: list[dict] = []
+    interrupt_count = 0  # 连按两次 Ctrl-C 才退出
 
     while True:
         try:
             user_input = input("\nfa> ").strip()
-        except (EOFError, KeyboardInterrupt):
+            interrupt_count = 0
+        except EOFError:
             print("\n再见 👋")
             return
+        except KeyboardInterrupt:
+            interrupt_count += 1
+            if interrupt_count >= 2:
+                print("\n再见 👋")
+                return
+            print("\n  (Ctrl-C 再按一次退出，或输入 /quit)")
+            continue
 
         if not user_input:
             continue
@@ -131,10 +163,19 @@ def run_repl(model: str | None = None, max_iterations: int = 6):
         if user_input == "/reset":
             messages.clear()
             state.clear()
+            state["confirm_mode"] = False
             print("[已清空对话历史和状态]")
             continue
         if user_input == "/state":
             print(json.dumps(state, ensure_ascii=False, indent=2))
+            continue
+        if user_input.startswith("/confirm"):
+            parts = user_input.split()
+            if len(parts) >= 2 and parts[1] in ("on", "off"):
+                state["confirm_mode"] = parts[1] == "on"
+                print(f"[confirm 模式: {'开 — 每次工具调用前确认' if state['confirm_mode'] else '关 — yolo 直跑'}]")
+            else:
+                print(f"[当前 confirm 模式: {'开' if state.get('confirm_mode') else '关'}]，用 /confirm on|off 切换")
             continue
 
         messages.append({"role": "user", "content": user_input})
@@ -173,10 +214,37 @@ def run_repl(model: str | None = None, max_iterations: int = 6):
 
             # 执行工具，把结果攒成 user 角色的 tool_result 列表
             tool_results = []
+            user_aborted_round = False
             for tu in tool_use_blocks:
                 _print_tool_call(tu.name, tu.input)
+
+                # 逐步确认模式
+                if state.get("confirm_mode"):
+                    decision = _confirm_tool_call(tu.name, tu.input)
+                    if decision == "q":
+                        result = "用户取消了整轮（剩余工具未执行）"
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tu.id,
+                            "content": result,
+                        })
+                        user_aborted_round = True
+                        break
+                    if decision == "n":
+                        result = "用户跳过了这个工具调用"
+                        _print_tool_result(tu.name, result)
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tu.id,
+                            "content": result,
+                        })
+                        continue
+
                 try:
                     result = dispatch(tu.name, tu.input, state)
+                except KeyboardInterrupt:
+                    print("\n  ⛔ 用户中断了工具执行")
+                    result = "用户按 Ctrl-C 中断了这个工具，保留会话状态。"
                 except Exception as e:
                     result = f"工具执行异常: {e}"
                 _print_tool_result(tu.name, result)
@@ -188,7 +256,7 @@ def run_repl(model: str | None = None, max_iterations: int = 6):
 
             messages.append({"role": "user", "content": tool_results})
 
-            if resp.stop_reason != "tool_use":
+            if user_aborted_round or resp.stop_reason != "tool_use":
                 break
         else:
             print(f"  [警告] 达到工具循环上限 {max_iterations}，强制中断")
