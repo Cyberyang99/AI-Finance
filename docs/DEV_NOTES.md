@@ -128,6 +128,51 @@ ANTHROPIC_API_KEY=sk-xxx                       # DeepSeek key
 - ✅ Frontmatter 字段统一
 - ⚠️ 文件名连字符 vs 下划线还混着用（`red-flags.md` 但 `risk-flags` 也接受），未来统一
 
+## 五点五、双机同步 + 原文归档（2026-05-29 增）
+
+### 双机记忆同步
+- **设计**：git 管代码；私有 md 数据（`knowledge/cot`、`theses/user`、`situations`、`episodic`、`raw`）软链到 `OneDrive/AI-Finance-data/memory`，两机共用。
+- **Windows**：`scripts/sync_setup.ps1`（junction/symlink）。**macOS**：`scripts/sync_setup.sh`（`ln -s`，`link/status/unlink` 三模式，路径用 `$HOME` 不硬编码）。
+- **关键决策：`agent.db` 不软链，各机本地一份。** 理由：SQLite 文件经 OneDrive 双机同步 + 同时写会损坏库。代价：db 内容（ingested 台账 / theses / reviews）不跨机自动同步——但 `fa cot/dash/recall` 全部读文件系统，**功能不受影响**，db 只是去重台账 + 经验记录。换机做了新 ingest/note 想同步 db，需手动 merge（参照本次 5/29 的双向 merge 脚本思路：按 file_hash 去重补 ingested_docs，空表直接拷经验行）。
+- **5/29 合并**：Mac 本地 4 CoT + OneDrive 13 CoT 曾分叉，已 additive 合并为 17（备份在 `agent.db.bak.20260529` 和 `memory/_premerge_bak_20260529/`）。
+
+### 原文归档（raw）
+- ingest 时把原始研报 `shutil.copy2` 到 `memory/raw/<hash>_<原名>`（`fa/ingest/base.py::archive_raw`），`ingested_docs.raw_path` 记录相对路径。
+- **为什么要做**：之前只存 CoT 蒸馏，`source_path` 指向桌面原文；删了桌面文件原文就没了，无法回溯原句/核对引用/重抽。归档后原文随 OneDrive 双机留存。
+- 回溯：`fa cot raw <query> [--open]` 按 CoT 的 `source_hash` 在 `raw/` 找回原文。
+- **历史数据**：5/29 之前摄入的 17 份 CoT 原文未归档（多数桌面原文已删），`fa cot raw` 会优雅提示「重新 ingest 即可补归档」。
+
+## 五点六、fa chat 体验升级（2026-05-29 增）
+
+围绕四块提升，全部不加新依赖（rich 已装、readline 标准库）：
+
+1. **UI（repl.py）**：rich 渲染——assistant 回复走 Markdown（表格/标题都能渲），工具调用/结果走淡色，LLM 调用期间 `console.status` 转圈。readline 输入历史（↑↓ 调历史，持久化 `~/.fa_chat_history`）。rich/readline 不可用时自动回退纯 print。
+2. **问答上下文**：① 上下文裁剪——超 `_MAX_CTX_CHARS` 时按"整轮(user 文本消息为边界)"从最旧裁，保 tool_use/result 配对不破。② 会话持久化——自动落盘 `memory/.chat_sessions/`（gitignore），`/save /load /sessions` 续聊。③ system prompt 注入「记忆概览」（板块/CoT/note 分布）给 LLM 接地。
+3. **召回/查询（tools.py 新工具）**：`search_memory`（跨 CoT 正文+note 关键词检索，返回定位 id）、`get_cot`（取某份 CoT 全文）、`get_note`（取某 ticker 笔记全文）、`list_cot` 加 keyword 过滤。**质变：bot 从"只会办事"变成"能读内容答问题"**——问"X 的核心逻辑"会 search→get_cot→综合回答。
+4. **删除/修改/合并**：`merge_cot`/`regroup_cot`/`rescore_cot`（包现成函数）、`reclassify_cot`（已有）、`delete_cot`/`delete_note`。**删除=软删除**：移到 `_archive/` 加 `deleted-YYYYMMDD-` 前缀（loader 跳过 `_archive*`，从 list/搜索/投票消失但文件还在，可恢复）——守红线"不删 memory"。
+
+### CoT 打分区分度升级 v3（2026-05-29）
+**病根**：signal 是"同一个 LLM 同一次生成顺手自评"→ 必然宽松（实测 ≥7 占 86%、≥8 占 56%，闸门 min_signal=7 形同虚设）；且原三维（传导/历史/时效）只量"可追踪性"，没有一维管"这是逻辑还是一家之言"。
+
+**改动**（只攻打分区分度，存量按用户决定暂不批量重打）：
+1. **维度 3→4**：新增 `falsifiability`（可证伪性/具体性）。9-10=有可观测触发+明确反证；1-5=纯价值判断/不可证伪（"管理优秀""护城河强""话语权提升"这类）。
+2. **权重重配**（config.toml [cot.score_weights]）：传导 0.35 / **证伪 0.30** / 历史 0.20 / 时效 0.15。证伪给到 0.3 才压得住软论断。
+3. **rescore 升级为独立 Critic**：抗通胀锚定（明示目标分布 ~15% 到 8+ / ~50% 在 6-7 / ~35% 在 5 以下）+ 强制每条写 `why_not_higher` 自我质疑 + 专挑一家之言压证伪分。
+
+**验证**（豪迈 dry-run）：分数从全挤 7-9 → 拉开成 2~9。"内部管理文化软壁垒" 8→3(证伪1)、"极致管理护城河" 8→4(证伪2)，"下游上修产能" 7→9(证伪9)。区分度回来了。
+
+**数据兼容**：CoT 子分行 v3 写 `传导·证伪·历史·时效`，loader 同时认 v3/v2 旧格式；`_coerce_signal` 对缺 falsifiability 的旧文件用 history 兜底，不崩不误高。ingest 仍自评(快)，质量靠 `fa cot rescore`(独立 Critic) 保证——这是用户拍板的取舍。
+> 待办：用户确认后用新 Critic 批量 rescore 存量 219 条（备份后跑）。
+
+### 主题 tag / ticker 归一化（2026-05-29）
+两台机分时摄入导致同一主题被空格拆开（`AI算力` vs `AI 算力`、`AI大模型与云` vs `AI 大模型与云`），直接把 CoT 召回主轴拆成两半。已按"多数派拼写"归一（多数带空格 → 留单空格），归一后 `AI 大模型与云`=104 条、`AI 算力`=95 条。同时把 theses/user 里 3 个带前导 0 的港股 note 文件名 + frontmatter ticker + 标题统一到去零规范（`03888.HK`→`3888.HK` 等），阿里两条 note 归并到 `9988.HK`。规范见 CLAUDE.md 命名约定。归一脚本是一次性的（未保留），备份在 `memory/_normalize_bak_20260529/`。
+> 教训：tag 和 ticker 都是召回键，任何"看起来一样但字节不同"的变体都会静默拆分记忆。摄入入口（ingest/note）未来应在写盘前做归一化（tag 去多余空格、ticker 过 _normalize_ticker），从源头堵住。
+
+### ⚠️ 踩坑：thinking block 必须原样回传
+DeepSeek v4 思考模式下，assistant content 含 `thinking` block。多轮 tool use 时，**这些块必须连同 signature 原样回传**给 API，否则报 `400 content[].thinking must be passed back`。
+- 旧 repl 直接 `messages.append({"content": resp.content})`（原始 block 对象）所以没事。
+- 重构时若把 content 转 dict 落盘/裁剪，**务必保留 thinking/redacted_thinking**（用 `block.model_dump(exclude_none=True)` 最稳，见 `_blocks_to_dicts`），只留 text/tool_use 会炸。
+
 ## 六、给未来 Claude 的建议
 
 1. **永远不要为"漂亮"重构记忆系统**。三层架构是有意的，不要合并。

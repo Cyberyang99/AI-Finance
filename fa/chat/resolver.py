@@ -289,3 +289,32 @@ def resolve_one(query: str) -> Optional[dict]:
     """返回最相关的一个匹配，无匹配返回 None。"""
     res = resolve(query, limit=1)
     return res[0] if res else None
+
+
+# ── ticker → 简称 反查（读本地缓存，绝不触发联网刷新）──
+
+_TICKER_NAME_MAP: Optional[dict] = None
+
+
+def name_for_ticker(ticker: str) -> Optional[str]:
+    """ticker → 公司简称（优先中文名）。仅读已有缓存文件，不刷新、不联网。
+
+    缓存缺失或 ticker 不在表里则返回 None（调用方自行兜底显示代码）。
+    """
+    global _TICKER_NAME_MAP
+    if _TICKER_NAME_MAP is None:
+        _TICKER_NAME_MAP = {}
+        try:
+            if CACHE_FILE.exists():
+                payload = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+                for s in payload.get("symbols", []):
+                    t, n = s.get("ticker"), (s.get("name") or "").strip()
+                    if not t or not n or n == "(直接输入)":
+                        continue
+                    cur = _TICKER_NAME_MAP.get(t)
+                    # 优先保留中文名；已有中文则不被英文覆盖
+                    if cur is None or (_is_chinese(n) and not _is_chinese(cur)):
+                        _TICKER_NAME_MAP[t] = n
+        except Exception:
+            _TICKER_NAME_MAP = {}
+    return _TICKER_NAME_MAP.get(_normalize_ticker(ticker))

@@ -23,7 +23,9 @@ auto_review_days = 90  # 多少天后自动触发回顾提醒
 
 [cot]
 [cot.score_weights]
-# signal = transmission*W_T + history*W_H + recency*W_R (自动归一化)
-transmission = 0.5
-history      = 0.3
-recency      = 0.2
+# signal = transmission*W_T + falsifiability*W_F + history*W_H + recency*W_R (自动归一化)
+# falsifiability(可证伪性)给足权重，才能把"一家之言"软论断压下去
+transmission   = 0.35
+falsifiability = 0.30
+history        = 0.20
+recency        = 0.15

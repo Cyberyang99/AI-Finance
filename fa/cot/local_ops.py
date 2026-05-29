@@ -70,6 +70,64 @@ def load_file_cots(fp: Path) -> tuple[dict, list[dict]]:
     return fm, cots
 
 
+def render_file_full(query: str) -> dict:
+    """定位 CoT 文件并返回全文（frontmatter 摘要 + 所有链），供问答/查看。
+
+    返回 {"file": str, "source": str, "sector": str, "tags": str,
+          "source_hash": str, "text": str(可读全文)} 或 {"error": ...}。
+    """
+    fp = find_cot_file(query)
+    if not fp:
+        return {"error": f"找不到匹配 '{query}' 的 CoT 文件"}
+    fm, cots = load_file_cots(fp)
+    lines = [
+        f"# {fm.get('source', fp.name)}",
+        f"主题(主): {fm.get('tags') or '(未打主题)'}  |  一级行业(兜底): {fm.get('sector', '')}",
+        f"ticker: {fm.get('ticker') or '(未绑定)'}  |  质量: {fm.get('quality_rating') or '?'}/5"
+        f"  |  created_at: {fm.get('created_at', '')}  |  source_hash: {fm.get('source_hash', '')}",
+        "",
+    ]
+    if fm.get("user_comment"):
+        lines.append(f"用户角度: {fm['user_comment']}")
+        lines.append("")
+    for i, c in enumerate(cots, 1):
+        sub = ""
+        if "transmission" in c and "history" in c and "recency" in c:
+            sub = f"  (传导{c['transmission']}·历史{c['history']}·时效{c['recency']})"
+        lines.append(f"## CoT {i} — {c['trigger']}  [信号 {c['signal']}/10]{sub}")
+        lines.append(f"{c['COT']}")
+        lines.append("")
+    return {
+        "file": str(fp), "source": fm.get("source", fp.name),
+        "sector": fm.get("sector", ""), "tags": fm.get("tags", ""),
+        "source_hash": fm.get("source_hash", ""), "cot_count": len(cots),
+        "text": "\n".join(lines),
+    }
+
+
+def soft_delete_file(query: str) -> dict:
+    """软删除 CoT 文件：移到所在 sector 的 _archive/，加 deleted-YYYYMMDD- 前缀。
+
+    不物理删除（可恢复）。归档后从 list/search/vote 中消失（loader 跳过 _archive*）。
+    返回 {"file": 原路径, "archived_to": 归档路径, "source": ...} 或 {"error": ...}。
+    """
+    import shutil
+    fp = find_cot_file(query)
+    if not fp:
+        return {"error": f"找不到匹配 '{query}' 的 CoT 文件"}
+    fm, _ = load_file_cots(fp)
+    archive_dir = fp.parent / "_archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    today = date.today().strftime("%Y%m%d")
+    target = archive_dir / f"deleted-{today}-{fp.name}"
+    i = 1
+    while target.exists():
+        target = archive_dir / f"deleted-{today}-{i}-{fp.name}"
+        i += 1
+    shutil.move(str(fp), str(target))
+    return {"file": str(fp), "archived_to": str(target), "source": fm.get("source", fp.name)}
+
+
 def write_cots_to_file(fp: Path, fm: dict, cots: list[dict], extra_header: str = "") -> None:
     """重写 CoT 文件。保留 frontmatter 字段，仅替换 body。"""
     lines = ["---"]
@@ -116,7 +174,8 @@ def write_cots_to_file(fp: Path, fm: dict, cots: list[dict], extra_header: str =
     for i, c in enumerate(cots, 1):
         sub_line = ""
         if "transmission" in c and "history" in c and "recency" in c:
-            sub_line = (f"  _(传导 {c['transmission']} · 历史 {c['history']} · "
+            fals = f" · 证伪 {c['falsifiability']}" if c.get("falsifiability") is not None else ""
+            sub_line = (f"  _(传导 {c['transmission']}{fals} · 历史 {c['history']} · "
                         f"时效 {c['recency']})_")
         lines.extend([
             f"## CoT {i} — {c['trigger']}",
@@ -238,7 +297,7 @@ def regroup_file(fp: Path, dry_run: bool = False) -> dict:
     clean_cots = []
     for mc in merged:
         item = {"trigger": mc["trigger"], "COT": mc["COT"], "signal": str(mc.get("signal", "5"))}
-        for k in ("transmission", "history", "recency"):
+        for k in ("transmission", "falsifiability", "history", "recency"):
             if k in mc:
                 item[k] = mc[k]
         clean_cots.append(item)
@@ -251,17 +310,18 @@ def regroup_file(fp: Path, dry_run: bool = False) -> dict:
 
 
 def rescore_file(fp: Path, dry_run: bool = False) -> dict:
-    """对单文件的 CoT 重新打分（不改 trigger/COT 内容）。
+    """对单文件的 CoT 重新打分（独立 Critic，不改 trigger/COT 内容）。
 
+    v3：四维打分 + 抗通胀锚定 + 专治"一家之言"。
     流程：
       1. 读出 cots
-      2. 对每条调 LLM，只让 LLM 输出 transmission/history/recency 三档分
+      2. 独立 Critic LLM 评四档子分 (transmission/falsifiability/history/recency)
       3. 用 config.toml 权重计算 signal
       4. 写回原文件（备份原版到 _archive/）
     """
     import json
     from ..config import load_config, make_anthropic_client
-    from ..ingest.cot_extractor import _get_score_weights, _parse_json_flexible, _coerce_signal
+    from ..ingest.cot_extractor import _get_score_weights, _parse_json_flexible, _coerce_signal, _SCORE_DIMS
 
     fm, cots = load_file_cots(fp)
     if not cots:
@@ -272,20 +332,29 @@ def rescore_file(fp: Path, dry_run: bool = False) -> dict:
     client = make_anthropic_client()
     weights = _get_score_weights()
 
-    sys_prompt = """你是投资思维链打分员。对给定的每条 CoT 只评三档子分（不修改 trigger/COT 内容）。
+    sys_prompt = """你是严格的投资思维链评审员（Critic）。对每条 CoT 独立打四档子分（不修改 trigger/COT 内容）。
 
-每个 1-10 整数:
-- transmission: 传导链清晰度
-- history: 历史可验证性
-- recency: 时效性
+## 四个维度（各 1-10 整数）
+- transmission 传导明确性：A→B→C→股价 链条是否清晰、每环是否有公开数据可追踪
+- falsifiability 可证伪性/具体性：**这条是"可观测可证伪的传导逻辑"还是"一家之言的价值判断"**
+    9-10 = 有明确可观测触发条件(具体数字/事件)+明确反证条件；
+    1-5  = 纯价值判断/静态论断/不可证伪（如"管理优秀""护城河强""话语权提升""竞争力被认可"），必须 ≤4
+- history 历史可验证性：同类逻辑历史上是否被验证过（≥3次=9-10，1-2次=6-8，全新=1-5）
+- recency 时效性：触发是否在持续、多久兑现（6个月内有验证点=9-10，长期>2年=1-5）
 
-严格 JSON 输出: {"scores": [{"id": 1, "transmission": x, "history": x, "recency": x}, ...]} 不要 markdown。"""
+## 抗通胀铁律（非常重要）
+你过去倾向于给所有 CoT 打 7-9 分，这是错的。一批 CoT 里**通常只有约 15% 该到 8+，约 50% 在 6-7，约 35% 在 5 以下**。
+- 不要给每条都打高分。看到"一家之言/陈述句/无法证伪的观点"，falsifiability 直接压到 1-4。
+- 对每条都要在 why_not_higher 字段写一句"为什么不给更高分"（强制自我质疑）。
+
+## 严格 JSON 输出（不要 markdown）
+{"scores": [{"id": 1, "transmission": x, "falsifiability": x, "history": x, "recency": x, "why_not_higher": "一句话"}, ...]}"""
 
     cot_list_str = "\n\n".join(
         f"[{i}] trigger: {c['trigger']}\nCOT: {c['COT']}"
         for i, c in enumerate(cots, 1)
     )
-    user_msg = f"## 输入 CoT 列表\n\n{cot_list_str}\n\n请输出 JSON："
+    user_msg = f"## 输入 CoT 列表（共 {len(cots)} 条，记住抗通胀铁律）\n\n{cot_list_str}\n\n请输出 JSON："
 
     print(f"[RESCORE] {fp.name}: {len(cots)} 条 → LLM 重新打分...")
     try:
@@ -310,7 +379,7 @@ def rescore_file(fp: Path, dry_run: bool = False) -> dict:
         if not s:
             continue
         old_signal = c.get("signal", "5")
-        for k in ("transmission", "history", "recency"):
+        for k in _SCORE_DIMS:
             try:
                 c[k] = max(1, min(10, int(s.get(k, 5))))
             except (TypeError, ValueError):
@@ -320,9 +389,11 @@ def rescore_file(fp: Path, dry_run: bool = False) -> dict:
         if new_signal != str(old_signal):
             report["updated"] += 1
             report["diffs"].append({
-                "trigger": c["trigger"][:60],
+                "trigger": c["trigger"][:50],
                 "old_signal": old_signal,
                 "new_signal": new_signal,
+                "falsifiability": c.get("falsifiability"),
+                "why_not_higher": str(s.get("why_not_higher", ""))[:80],
             })
 
     if dry_run:

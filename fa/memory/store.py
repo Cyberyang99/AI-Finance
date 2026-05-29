@@ -138,6 +138,7 @@ class MemoryStore:
                     pages INTEGER,                     -- 页/sheet/slide 数
                     cot_count INTEGER DEFAULT 0,       -- 提炼了多少条 CoT
                     cot_file TEXT,                     -- CoT md 文件相对路径
+                    raw_path TEXT,                     -- 原文归档相对路径 raw/<hash>_<原名>
                     ingested_at TEXT DEFAULT (datetime('now'))
                 );
 
@@ -183,6 +184,11 @@ class MemoryStore:
             ]:
                 if pcols and col not in pcols:
                     c.execute(f"ALTER TABLE performance ADD COLUMN {col} {ddl}")
+
+            # ingested_docs 原文归档字段
+            icols = {r["name"] for r in c.execute("PRAGMA table_info(ingested_docs)").fetchall()}
+            if icols and "raw_path" not in icols:
+                c.execute("ALTER TABLE ingested_docs ADD COLUMN raw_path TEXT")
 
     # ── 论点操作 ──
 
@@ -392,7 +398,8 @@ class MemoryStore:
 
     def save_ingested_doc(self, source_path: str, filename: str, file_type: str,
                           file_hash: str, ticker: str = None, sector: str = None,
-                          pages: int = 0, cot_count: int = 0, cot_file: str = None) -> int:
+                          pages: int = 0, cot_count: int = 0, cot_file: str = None,
+                          raw_path: str = None) -> int:
         """保存摄入记录。同 file_hash 已存在则更新，返回 id。"""
         with self._conn() as c:
             row = c.execute("SELECT id FROM ingested_docs WHERE file_hash=?",
@@ -400,15 +407,15 @@ class MemoryStore:
             if row:
                 c.execute("""
                     UPDATE ingested_docs SET ticker=?, sector=?, cot_count=?, cot_file=?,
-                    ingested_at=datetime('now') WHERE id=?
-                """, (ticker, sector, cot_count, cot_file, row["id"]))
+                    raw_path=COALESCE(?, raw_path), ingested_at=datetime('now') WHERE id=?
+                """, (ticker, sector, cot_count, cot_file, raw_path, row["id"]))
                 return row["id"]
             cur = c.execute("""
                 INSERT INTO ingested_docs (source_path, filename, file_type, file_hash,
-                ticker, sector, pages, cot_count, cot_file)
-                VALUES (?,?,?,?,?,?,?,?,?)
+                ticker, sector, pages, cot_count, cot_file, raw_path)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
             """, (source_path, filename, file_type, file_hash,
-                  ticker, sector, pages, cot_count, cot_file))
+                  ticker, sector, pages, cot_count, cot_file, raw_path))
             return cur.lastrowid
 
     def has_ingested(self, file_hash: str) -> bool:

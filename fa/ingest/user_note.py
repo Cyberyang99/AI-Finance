@@ -225,6 +225,12 @@ def auto_structure_from_doc(
 
 
 def _safe_ticker(t: str) -> str:
+    # 先过 ticker 规范化（港股去前导 0、A 股补零），再做文件名安全清洗
+    try:
+        from ..chat.resolver import _normalize_ticker
+        t = _normalize_ticker(t.strip())
+    except Exception:
+        pass
     return re.sub(r"[\\/:*?\"<>|]", "_", t.strip().upper())
 
 
@@ -347,6 +353,37 @@ def load_user_notes(ticker: Optional[str] = None) -> list[dict]:
         })
     out.sort(key=lambda x: x["created_at"], reverse=True)
     return out
+
+
+def soft_delete_note(ticker: str, note_date: Optional[str] = None) -> dict:
+    """软删除用户笔记：移到 theses/user/_archive/，不物理删除（可恢复）。
+
+    note_date 指定 YYYY-MM-DD 只删那天的；不指定则删该 ticker 全部笔记。
+    归档后 load_user_notes 不再返回（glob 不递归 _archive）。
+    返回 {"archived": [路径...], "ticker": ...} 或 {"error": ...}。
+    """
+    import shutil
+    from datetime import date as _date
+    t = _safe_ticker(ticker)
+    notes = [n for n in load_user_notes(ticker)
+             if not note_date or n["created_at"] == note_date]
+    if not notes:
+        scope = f" {note_date}" if note_date else ""
+        return {"error": f"没找到 {t}{scope} 的笔记"}
+    archive_dir = USER_THESES_DIR / "_archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    today = _date.today().strftime("%Y%m%d")
+    archived = []
+    for n in notes:
+        src = Path(n["path"])
+        target = archive_dir / f"deleted-{today}-{src.name}"
+        i = 1
+        while target.exists():
+            target = archive_dir / f"deleted-{today}-{i}-{src.name}"
+            i += 1
+        shutil.move(str(src), str(target))
+        archived.append(str(target))
+    return {"ticker": t, "archived": archived}
 
 
 # ── 12 维度 note 保存（新模板） ──

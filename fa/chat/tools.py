@@ -438,14 +438,19 @@ def _do_list_cot(args: dict, state: dict) -> str:
             sector = sector_raw  # 解析不到也允许直接用（兼容历史目录）
     tag = (args.get("tag") or "").strip() or tag_from_sector or None
     min_signal = int(args.get("min_signal") or 0)
+    keyword = (args.get("keyword") or "").strip().lower()
     cots = load_cots(sector=sector, min_signal=min_signal, tag=tag)
+    if keyword:
+        cots = [c for c in cots
+                if keyword in f"{c.get('trigger','')} {c.get('COT','')}".lower()]
     if not cots:
-        return f"无 CoT (sector={sector}, tag={tag}, min_signal={min_signal})"
+        return f"无 CoT (sector={sector}, tag={tag}, min_signal={min_signal}, keyword={keyword or '无'})"
     lines = [f"=== CoT 列表 ({len(cots)} 条) ==="]
     for c in cots[:15]:
         lines.append(f"  [{c['signal']}/10] {c['trigger']}")
-        tags_str = f", tags={c.get('_tags')}" if c.get('_tags') else ""
-        lines.append(f"    sector={c['_sector']}{tags_str}")
+        tags = c.get("_tags") or []
+        theme = "、".join(tags) if tags else "(未打主题)"
+        lines.append(f"    主题={theme}  ·  行业={c['_sector']}")
     if len(cots) > 15:
         lines.append(f"... 还有 {len(cots) - 15} 条")
     if sector:
@@ -569,7 +574,8 @@ TOOLS_SPEC = [
             "properties": {
                 "sector": {"type": "string", "description": "主板块 (sector_id 或别名)，例：CapitalGoods / 半导体"},
                 "tag": {"type": "string", "description": "主题 tag，跨板块召回。例：'AI 主题' / '燃气轮机'"},
-                "min_signal": {"type": "integer", "description": "信号强度下限 1-10"}
+                "min_signal": {"type": "integer", "description": "信号强度下限 1-10"},
+                "keyword": {"type": "string", "description": "在 trigger+正文里再做关键词过滤（可选）"}
             },
             "required": []
         },
@@ -604,6 +610,105 @@ TOOLS_SPEC = [
             "required": ["query"],
         },
     },
+    {
+        "name": "search_memory",
+        "description": ("【召回】跨 CoT 正文 + 用户笔记做关键词检索，返回带定位 id 的命中片段。"
+                        "当用户问『有没有关于 X 的研究/逻辑』『提到 Y 的都有哪些』时用。"
+                        "拿到命中后，要看某条全文用 get_cot，看笔记全文用 get_note。"),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "关键词，例：燃气轮机 / 算力租赁 / 国产替代"},
+                "scope": {"type": "string", "enum": ["all", "cot", "note"], "description": "检索范围，默认 all"},
+                "limit": {"type": "integer", "description": "每类最多返回多少条，默认 12"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "get_cot",
+        "description": ("【问答关键】返回某份 CoT 文件的全文（所有思维链正文），让你能据此回答用户的具体问题。"
+                        "当用户问『X 的核心逻辑/推理链是什么』『那份研报讲了啥』时，先 get_cot 拿全文再回答，不要凭空答。"),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "cot_id 前缀 / source 文件名片段 / 公司名，用于定位文件"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "get_note",
+        "description": "返回某 ticker 的用户笔记全文（12 维度/核心论点）。用户问『我对 X 的看法/论点是什么』时用。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "股票代码或公司名，可空（默认最近 ticker）"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "merge_cot",
+        "description": ("同一 sector 内把多份 CoT 做 LLM 聚类合并去重（产出 merged 文件，原文件归档）。"
+                        "用户说『合并 X 板块的 CoT』『去重』时用。默认真跑；用户说『预览/先看看』传 dry_run=true。"),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sector": {"type": "string", "description": "板块 (sector_id 或别名)，可空则用最近 sector"},
+                "dry_run": {"type": "boolean", "description": "true 只预览不写盘，默认 false"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "regroup_cot",
+        "description": "单份 CoT 文件内部重新分组合并去重（不重新调 LLM 抽取，纯本地）。用户对某份报告里 CoT 重复/冗余不满时用。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "cot_id 前缀 / source 文件名片段 定位文件"},
+                "dry_run": {"type": "boolean", "description": "true 只预览，默认 false"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "rescore_cot",
+        "description": "对单份 CoT 文件仅重新打分（signal），保留 trigger/正文不变。改了打分权重后用。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "cot_id 前缀 / source 文件名片段 定位文件"},
+                "dry_run": {"type": "boolean", "description": "true 只预览，默认 false"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "delete_cot",
+        "description": ("软删除一份 CoT（移到 _archive/，可恢复，绝不物理删）。从 list/搜索/投票中移除。"
+                        "用户说『删掉 X 那份 CoT』时用。删前简短确认一下删的是哪份。"),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "cot_id 前缀 / source 文件名片段 / 公司名 定位要删的文件"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "delete_note",
+        "description": "软删除某 ticker 的用户笔记（移到 _archive/，可恢复）。不给 date 删该 ticker 全部，给 date 只删那天。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "股票代码或公司名，可空（默认最近 ticker）"},
+                "date": {"type": "string", "description": "YYYY-MM-DD，可空；只删指定日期那条"},
+            },
+            "required": [],
+        },
+    },
 ]
 
 
@@ -627,6 +732,183 @@ def _do_reclassify_cot(args: dict, state: dict) -> str:
     return "\n".join(lines)
 
 
+# ── Block 3: 召回 / 查询 ──
+
+def _do_search_memory(args: dict, state: dict) -> str:
+    """跨 CoT / note 关键词检索，返回带定位 id 的命中片段。"""
+    from ..cot import load_cots
+    from ..ingest.user_note import load_user_notes
+    q = (args.get("query") or "").strip()
+    if not q:
+        return "错误：缺少 query"
+    scope = (args.get("scope") or "all").lower()
+    ql = q.lower()
+    limit = int(args.get("limit") or 12)
+    lines = []
+
+    if scope in ("all", "cot"):
+        cot_hits = []
+        for c in load_cots():
+            hay = f"{c.get('trigger','')} {c.get('COT','')} {' '.join(c.get('_tags') or [])} {c.get('_source','')}".lower()
+            if ql in hay:
+                cot_hits.append(c)
+        cot_hits.sort(key=lambda c: -int(c.get("signal", 0) or 0))
+        if cot_hits:
+            lines.append(f"=== CoT 命中 {len(cot_hits)} 条（按信号排序，展示前 {min(limit, len(cot_hits))}）===")
+            for c in cot_hits[:limit]:
+                lines.append(f"  [{c['signal']}/10] {c['trigger']}")
+                tags = c.get("_tags") or []
+                theme = "、".join(tags) if tags else "(未打主题)"
+                lines.append(f"    id={c['_cot_id']}  主题={theme}  行业={c['_sector']}  来源={c['_source']}")
+                snippet = c.get("COT", "")[:120].replace("\n", " ")
+                lines.append(f"    {snippet}{'...' if len(c.get('COT',''))>120 else ''}")
+
+    if scope in ("all", "note"):
+        note_hits = [n for n in load_user_notes() if ql in n["content"].lower()]
+        if note_hits:
+            lines.append(f"\n=== 笔记命中 {len(note_hits)} 条 ===")
+            for n in note_hits[:limit]:
+                # 抓含关键词的那一行做片段
+                snippet = ""
+                for ln in n["content"].split("\n"):
+                    if ql in ln.lower() and ln.strip() and not ln.startswith("#"):
+                        snippet = ln.strip()[:120]
+                        break
+                lines.append(f"  [{n['created_at']}] {n['ticker']}  {snippet}")
+
+    if not lines:
+        return f"没有命中 '{q}' 的 CoT 或笔记（scope={scope}）。可换个关键词，或用 list_cot 看全量。"
+    lines.append("\n（要看某条全文，用 get_cot 传 id/source 片段；看笔记全文用 get_note 传 ticker）")
+    return "\n".join(lines)
+
+
+def _do_get_cot(args: dict, state: dict) -> str:
+    """返回某份 CoT 文件全文（所有链），供 LLM 据此回答问题。"""
+    from ..cot.local_ops import render_file_full
+    query = (args.get("query") or "").strip()
+    if not query:
+        return "错误：缺少 query（cot_id 前缀 / source 文件名片段 / 公司名）"
+    res = render_file_full(query)
+    if "error" in res:
+        return f"✗ {res['error']}"
+    if res.get("sector"):
+        state["last_sector"] = res["sector"]
+    return res["text"]
+
+
+def _do_get_note(args: dict, state: dict) -> str:
+    """返回某 ticker 的笔记全文。"""
+    from ..ingest.user_note import load_user_notes
+    ticker = _resolve_ticker(args.get("ticker"), state)
+    if not ticker:
+        return "错误：找不到 ticker"
+    notes = load_user_notes(ticker)
+    if not notes:
+        return f"{ticker} 没有笔记"
+    state["last_ticker"] = ticker
+    latest = notes[0]
+    body = latest["content"].split("---", 2)[-1].strip()
+    head = f"=== {ticker} 笔记 [{latest['created_at']}]"
+    if len(notes) > 1:
+        head += f"（共 {len(notes)} 条，展示最新一条；其余日期: {', '.join(n['created_at'] for n in notes[1:6])}）"
+    head += " ==="
+    return f"{head}\n{body}"
+
+
+# ── Block 4: 修改 / 合并 / 软删除 ──
+
+def _do_merge_cot(args: dict, state: dict) -> str:
+    """同 sector 内 CoT LLM 聚类合并去重（包 merge_sector）。"""
+    import io, contextlib
+    from ..cot.merger import merge_sector, list_sectors_with_cots
+    from ..sectors import resolve_alias
+    sector_raw = (args.get("sector") or "").strip() or state.get("last_sector")
+    dry_run = bool(args.get("dry_run"))
+    if not sector_raw:
+        avail = list_sectors_with_cots()
+        listing = "\n".join(f"  {s} ({n} 条)" for s, n in avail)
+        return f"请指定要合并的 sector。当前有 CoT 的板块：\n{listing}"
+    sector = resolve_alias(sector_raw) or sector_raw
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rep = merge_sector(sector, dry_run=dry_run)
+    out = buf.getvalue().strip()
+    if rep.get("skipped"):
+        return f"[merge {sector}] 跳过：{rep['skipped']}"
+    if rep.get("error"):
+        return f"[merge {sector}] 失败：{rep['error']}\n{out}"
+    state["last_sector"] = sector
+    tail = f"{out}\n" if out else ""
+    if dry_run:
+        return f"{tail}[预览] {sector}：建议合并方案如上，未写盘。说『确认合并 {sector}』真跑。"
+    return f"{tail}✓ {sector} 合并完成，原文件已归档到 _archive/。"
+
+
+def _do_regroup_cot(args: dict, state: dict) -> str:
+    """单文件内 CoT 本地重组合并去重（不重抽 LLM）。"""
+    import io, contextlib
+    from ..cot.local_ops import find_cot_file, regroup_file
+    query = (args.get("query") or "").strip()
+    if not query:
+        return "错误：缺少 query"
+    fp = find_cot_file(query)
+    if not fp:
+        return f"找不到匹配 '{query}' 的 CoT 文件"
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rep = regroup_file(fp, dry_run=bool(args.get("dry_run")))
+    out = buf.getvalue().strip()
+    if isinstance(rep, dict) and rep.get("error"):
+        return f"✗ {rep['error']}\n{out}"
+    return out or f"✓ 已重组 {fp.name}"
+
+
+def _do_rescore_cot(args: dict, state: dict) -> str:
+    """单文件仅重新打分（不重抽 CoT）。"""
+    import io, contextlib
+    from ..cot.local_ops import find_cot_file, rescore_file
+    query = (args.get("query") or "").strip()
+    if not query:
+        return "错误：缺少 query"
+    fp = find_cot_file(query)
+    if not fp:
+        return f"找不到匹配 '{query}' 的 CoT 文件"
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rep = rescore_file(fp, dry_run=bool(args.get("dry_run")))
+    out = buf.getvalue().strip()
+    if isinstance(rep, dict) and rep.get("error"):
+        return f"✗ {rep['error']}\n{out}"
+    return out or f"✓ 已重新打分 {fp.name}"
+
+
+def _do_delete_cot(args: dict, state: dict) -> str:
+    """软删除 CoT 文件：移到 _archive/（可恢复，不物理删）。"""
+    from ..cot.local_ops import soft_delete_file
+    query = (args.get("query") or "").strip()
+    if not query:
+        return "错误：缺少 query"
+    res = soft_delete_file(query)
+    if "error" in res:
+        return f"✗ {res['error']}"
+    from pathlib import Path as _P
+    return (f"✓ 已软删除（归档，可恢复）: {res['source']}\n"
+            f"  归档到: {_P(res['archived_to']).parent.name}/{_P(res['archived_to']).name}\n"
+            f"  已从 list/搜索/投票中移除。要彻底恢复把文件从 _archive/ 移回即可。")
+
+
+def _do_delete_note(args: dict, state: dict) -> str:
+    """软删除用户笔记：移到 theses/user/_archive/（可恢复）。"""
+    from ..ingest.user_note import soft_delete_note
+    ticker = _resolve_ticker(args.get("ticker"), state)
+    if not ticker:
+        return "错误：找不到 ticker"
+    res = soft_delete_note(ticker, note_date=(args.get("date") or None))
+    if "error" in res:
+        return f"✗ {res['error']}"
+    return (f"✓ 已软删除（归档，可恢复）{res['ticker']} 的 {len(res['archived'])} 条笔记 → theses/user/_archive/")
+
+
 HANDLERS: dict[str, Callable[[dict, dict], str]] = {
     "find_ticker": _do_find_ticker,
     "add_note": _do_add_note,
@@ -639,6 +921,14 @@ HANDLERS: dict[str, Callable[[dict, dict], str]] = {
     "dashboard": _do_dash,
     "list_sectors": _do_sectors,
     "reclassify_cot": _do_reclassify_cot,
+    "search_memory": _do_search_memory,
+    "get_cot": _do_get_cot,
+    "get_note": _do_get_note,
+    "merge_cot": _do_merge_cot,
+    "regroup_cot": _do_regroup_cot,
+    "rescore_cot": _do_rescore_cot,
+    "delete_cot": _do_delete_cot,
+    "delete_note": _do_delete_note,
 }
 
 

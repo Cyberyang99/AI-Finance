@@ -21,6 +21,24 @@ def file_hash(path: Path) -> str:
     return h.hexdigest()[:16]
 
 
+def archive_raw(src_path: str | Path, file_hash_val: str) -> str:
+    """把原始研报文件归档到 memory/raw/<hash>_<原名>，返回相对 memory/ 的路径。
+
+    memory/raw/ 已软链到 OneDrive，归档后随双机同步。
+    同 hash 已归档则跳过拷贝（去重）。删了桌面原文也能从这里回溯原句。
+    """
+    import shutil
+    from ..memory.store import PROJECT_DIR
+
+    src = Path(src_path).expanduser()
+    raw_dir = PROJECT_DIR / "memory" / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    dest = raw_dir / f"{file_hash_val}_{src.name}"
+    if not dest.exists():
+        shutil.copy2(src, dest)
+    return f"raw/{dest.name}"
+
+
 def ingest_file(path: str | Path) -> dict:
     """从单个文件抽取纯文本。
 

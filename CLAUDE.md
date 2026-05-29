@@ -58,8 +58,8 @@ memory/                   # 持久化数据（git 管理，可读、可追溯）
     <id>.md               # 单条
   episodic/               # 历史归档
     theses/ scans/ reviews/
-  raw/                    # [P0] 原始文件归档（可选）
-    <hash>_<原名>
+  raw/                    # 原始研报归档（ingest 时自动存，软链 OneDrive 双机同步）
+    <hash>_<原名>         # fa cot raw <query> 可回溯；ingested_docs.raw_path 记录
   cache/                  # 数据缓存（pickle, 24h TTL，不入 git）
   benchmarks/             # 大盘基准缓存
   agent.db                # SQLite 主库
@@ -69,7 +69,8 @@ memory/                   # 持久化数据（git 管理，可读、可追溯）
 
 - 所有 md 用 UTF-8 无 BOM
 - 文件名小写，连字符分隔（`red-flags.md` 不是 `red_flags.md`）
-- ticker 用大写 + 交易所后缀：`2513.HK` / `300750.SHE` / `AAPL.US`
+- ticker 用大写 + 交易所后缀：`2513.HK` / `300750.SHE` / `AAPL.US`。**港股去前导 0**（`3888.HK` 不是 `03888.HK`）、A 股 6 位补零。统一走 `resolver._normalize_ticker`；note 文件名、frontmatter `ticker:`、正文标题三处必须一致
+- 主题 tag：前导 ASCII 词与中文之间留**单空格**（`AI 算力` / `AI 大模型与云`，不是 `AI算力`）。tag 是 CoT 召回主轴，拼写不一致会把同一主题拆开、拖累召回
 - 日期一律 `YYYY-MM-DD`
 - Frontmatter 字段固定：`ticker / sector / source / created_at / confidence / sector_scope / sector_excluded`
 
@@ -99,7 +100,7 @@ fa deep 2513.HK                 # 端到端冒烟（DeepSeek 真实调用）
 | **P2** | CoT 联合投票选股 + deep 模式 CoT 辅助证据 | ✅ |
 | **Tier 1** | CoT 合并迭代 + note 自动结构化 + import 通用入口 | ✅ |
 | **Tier 1.5** | CoT 质量自适应数量 + 显化打分子分 + dash 全库统计 + regroup/edit/rescore + docx 文本框抽取 | ✅ |
-| Tier 2 | fa chat / Web UI / 微信 bot / 多 workspace（按用户实测痛点决定优先级） | ⏳ |
+| Tier 2 | **fa chat 体验升级（rich UI + 上下文裁剪/会话持久化 + search/get 召回 + 软删除/合并）✅** ; Web UI / 微信 bot / 多 workspace ⏳ | 🔵 进行中 |
 | Tier 3 | Mem-Palace 层级 + GEPA 进化 + CoT 单链回测 + 多模态 | ⏳ |
 
 ## 关键配置（不进 git）

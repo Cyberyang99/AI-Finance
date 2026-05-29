@@ -29,6 +29,21 @@ memory/reviews/
 memory/situations/*.md
 !memory/situations/MEMORY.md.example
 
+# 双机同步软链 + 合并备份（本机生成，勿提交；Windows 用 junction，macOS 用 ln -s）
+# 注意：上面带斜杠的 memory/xxx/ 只匹配目录内容，不匹配软链本身，这里补无斜杠版
+memory/knowledge/cot
+memory/theses/user
+memory/episodic
+memory/situations
+memory/raw
+memory/*.bak.*
+memory/**/*.bak.local.*
+memory/_premerge_bak_*/
+memory/_normalize_bak_*/
+
+# fa chat 会话历史（私有对话，本机+OneDrive，不入 git）
+memory/.chat_sessions/
+
 # 调试临时文件
 .pdf*.txt
 .smoke_test*.py

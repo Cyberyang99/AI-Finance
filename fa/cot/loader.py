@@ -84,15 +84,24 @@ def _parse_cot_body(body: str) -> list[dict]:
         trigger = m_trig.group(1).strip() if m_trig else ""
         m_sig = re.search(r"\*\*信号强度\*\*:\s*(\d+)\s*/\s*10", block)
         signal = m_sig.group(1) if m_sig else "5"
-        # v2 子分（可选）
-        m_sub = re.search(r"传导\s*(\d+)\s*·\s*历史\s*(\d+)\s*·\s*时效\s*(\d+)", block)
+        # 子分（可选）。v3 含「证伪」；兼容 v2 旧格式（无证伪）
         sub_scores = {}
-        if m_sub:
+        m_sub4 = re.search(r"传导\s*(\d+)\s*·\s*证伪\s*(\d+)\s*·\s*历史\s*(\d+)\s*·\s*时效\s*(\d+)", block)
+        if m_sub4:
             sub_scores = {
-                "transmission": int(m_sub.group(1)),
-                "history": int(m_sub.group(2)),
-                "recency": int(m_sub.group(3)),
+                "transmission": int(m_sub4.group(1)),
+                "falsifiability": int(m_sub4.group(2)),
+                "history": int(m_sub4.group(3)),
+                "recency": int(m_sub4.group(4)),
             }
+        else:
+            m_sub = re.search(r"传导\s*(\d+)\s*·\s*历史\s*(\d+)\s*·\s*时效\s*(\d+)", block)
+            if m_sub:
+                sub_scores = {
+                    "transmission": int(m_sub.group(1)),
+                    "history": int(m_sub.group(2)),
+                    "recency": int(m_sub.group(3)),
+                }
         m_cot = re.search(r"\*\*推理链\*\*:\s*(.+?)(?=\n##|\Z)", block, re.DOTALL)
         cot_text = m_cot.group(1).strip() if m_cot else ""
         if trigger and cot_text:

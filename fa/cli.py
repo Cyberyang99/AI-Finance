@@ -173,6 +173,10 @@ def main():
     pcot_rs.add_argument("query", help="cot_id 前缀 / source 文件名片段")
     pcot_rs.add_argument("--dry-run", action="store_true")
 
+    pcot_raw = cotsub.add_parser("raw", help="按 CoT 回溯归档的原始研报文件")
+    pcot_raw.add_argument("query", help="cot_id 前缀 / source 文件名片段 / sector 名")
+    pcot_raw.add_argument("--open", action="store_true", help="找到后用系统默认程序打开原文")
+
     # dashboard
     sub.add_parser("dash", help="仪表盘")
 
@@ -693,11 +697,20 @@ def _ingest_one(fpath, ticker, sector, with_cot=True, force=False, user_comment=
         else:
             print(f"  ⚠ 未能提炼出 CoT")
 
+    # 原文归档：拷贝到 memory/raw/（软链到 OneDrive，随双机同步），删了桌面原文也能回溯
+    raw_rel = None
+    try:
+        from .ingest.base import archive_raw
+        raw_rel = archive_raw(doc["path"], doc["hash"])
+        print(f"  ✓ 原文归档 → {raw_rel}")
+    except Exception as e:
+        print(f"  ⚠ 原文归档失败（不影响 CoT）: {e}")
+
     store.save_ingested_doc(
         source_path=doc["path"], filename=doc["filename"],
         file_type=doc["ext"], file_hash=doc["hash"],
         ticker=ticker, sector=final_sector, pages=doc["pages"],
-        cot_count=cot_count_out, cot_file=cot_file_rel,
+        cot_count=cot_count_out, cot_file=cot_file_rel, raw_path=raw_rel,
     )
 
 
@@ -977,6 +990,10 @@ def _cmd_cot(args):
         _cmd_cot_rescore(args.query, dry_run=args.dry_run)
         return
 
+    if args.cot_cmd == "raw":
+        _cmd_cot_raw(args.query, open_file=getattr(args, "open", False))
+        return
+
     if args.cot_cmd == "score":
         ticker = args.ticker.upper()
         print(f"[COT-SCORE] {ticker}")
@@ -1115,6 +1132,50 @@ def _cmd_cot_edit(query: str):
         print(f"[COT-EDIT] 调用编辑器失败: {e}")
 
 
+def _cmd_cot_raw(query: str, open_file: bool = False):
+    """按 CoT 回溯归档的原始研报文件（memory/raw/<hash>_<原名>）。"""
+    from pathlib import Path as _P
+    from .cot.local_ops import find_cot_file, load_file_cots
+
+    fp = find_cot_file(query)
+    if not fp:
+        print(f"[COT-RAW] 没找到匹配 '{query}' 的 CoT 文件")
+        return
+    fm, _ = load_file_cots(fp)
+    src_hash = (fm.get("source_hash") or "").lower()
+    source = fm.get("source", "")
+    raw_dir = _P(__file__).resolve().parent.parent / "memory" / "raw"
+
+    matches = []
+    if src_hash and raw_dir.exists():
+        matches = sorted(raw_dir.glob(f"{src_hash}*"))
+    if not matches:
+        # 退而求其次：用 ingested_docs 台账里的 raw_path / source_path
+        rec = [r for r in store.list_ingested(limit=10000) if (r.get("file_hash") or "").lower() == src_hash]
+        if rec and rec[0].get("raw_path"):
+            cand = _P(__file__).resolve().parent.parent / "memory" / rec[0]["raw_path"]
+            if cand.exists():
+                matches = [cand]
+        if not matches:
+            print(f"[COT-RAW] CoT 命中: {source} (hash={src_hash or '?'})")
+            print(f"[COT-RAW] ⚠ 未在 memory/raw/ 找到归档原文。")
+            if rec and rec[0].get("source_path"):
+                print(f"          台账记录的原始路径: {rec[0]['source_path']}")
+            print(f"          （该研报可能在加 raw 归档功能之前摄入，重新 ingest 即可补归档）")
+            return
+
+    raw_fp = matches[0]
+    print(f"[COT-RAW] CoT: {source}")
+    print(f"[COT-RAW] 原文归档: {raw_fp}")
+    if open_file:
+        import subprocess, sys
+        opener = "open" if sys.platform == "darwin" else ("start" if sys.platform.startswith("win") else "xdg-open")
+        try:
+            subprocess.run([opener, str(raw_fp)] if opener != "start" else ["cmd", "/c", "start", "", str(raw_fp)])
+        except Exception as e:
+            print(f"[COT-RAW] 打开失败: {e}")
+
+
 def _cmd_cot_regroup(query: str, dry_run: bool = False):
     """单文件内 CoT 本地重组（合并去重），不重新调 LLM 抽取。"""
     from .cot.local_ops import find_cot_file, regroup_file
@@ -1161,8 +1222,12 @@ def _cmd_cot_rescore(query: str, dry_run: bool = False):
         print(f"  ✗ {report['error']}")
         return
     print(f"  共 {report['count']} 条，{report['updated']} 条 signal 有变动")
-    for d in report.get("diffs", [])[:10]:
-        print(f"    [{d['old_signal']} → {d['new_signal']}] {d['trigger']}")
+    for d in report.get("diffs", [])[:20]:
+        fals = d.get("falsifiability")
+        fals_str = f" 证伪={fals}" if fals is not None else ""
+        print(f"    [{d['old_signal']} → {d['new_signal']}]{fals_str} {d['trigger']}")
+        if d.get("why_not_higher"):
+            print(f"         ↳ {d['why_not_higher']}")
     if dry_run:
         print(f"\n  去掉 --dry-run 真正写盘。")
     else:
