@@ -22,9 +22,10 @@ history_years = 5   # 回溯多少年财务数据
 auto_review_days = 90  # 多少天后自动触发回顾提醒
 
 [cot]
-# 提取 CoT 专用模型：提取是高价值低频调用，用 pro 提质；其余命令仍走 [agent] model。
-# 想省钱可改回 "deepseek-v4-flash" 或删掉本行（删掉则跟随 [agent] model）。
-extract_model = "deepseek-v4-pro"
+# 提取 CoT 专用模型。曾试 deepseek-v4-pro 但调用一直卡住（pro 别名在网关上慢/未正确映射），
+# 退回 flash —— 227 条历史 CoT 全是 flash 跑的，质量提升靠 prompt（原文依据/证伪维/放开截断），与模型无关。
+# 待确认 pro 别名可用后可再切回。
+extract_model = "deepseek-v4-flash"
 # 单块提取字符上限，超出自动按段落分块再汇总，不再静默截断丢失后半篇。
 max_chars = 100000
 
