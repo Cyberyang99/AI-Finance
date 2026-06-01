@@ -192,8 +192,13 @@ def _archive_sector_files(sector: str) -> list[Path]:
     return archived
 
 
-def _write_merged_file(sector: str, merged_cots: list[dict]) -> Path:
-    """把合并后的 CoT 写到 cot/<sector>/merged-YYYY-MM-DD.md。"""
+def _write_merged_file(sector: str, merged_cots: list[dict],
+                       tags: Optional[list] = None) -> Path:
+    """把合并后的 CoT 写到 cot/<sector>/merged-YYYY-MM-DD.md。
+
+    子分（传导/证伪/历史/时效）、原文依据、tags 都会保留，
+    使合并文件与单篇文件格式一致，loader 能照常解析、tag 跨板块召回不失效。
+    """
     safe_sect = re.sub(r"[\\/:*?\"<>|]", "_", sector)
     sector_dir = COT_DIR / safe_sect
     sector_dir.mkdir(parents=True, exist_ok=True)
@@ -216,24 +221,40 @@ def _write_merged_file(sector: str, merged_cots: list[dict]) -> Path:
         f"created_at: {today}",
         f"cot_count: {len(merged_cots)}",
         f"is_merged: true",
+    ]
+    tags = [t for t in (tags or []) if t]
+    if tags:
+        lines.append(f"tags: [{', '.join(tags)}]")
+    lines.extend([
         "---",
         "",
         f"# CoT 合并集成 ({sector}) — {today}",
         "",
         f"_本文件由 fa cot merge 自动产出，整合自该板块下所有历史 CoT。原始文件归档到 ./_archive/_",
         "",
-    ]
+    ])
+    if tags:
+        lines.extend(["**主题 tags**: " + " · ".join(f"#{t}" for t in tags), ""])
     for i, c in enumerate(merged_cots, 1):
         src_count = len(c.get("_source_ids", []))
         merge_tag = f" (合并自 {src_count} 条)" if src_count > 1 else ""
         lines.extend([
             f"## CoT {i} — {c['trigger']}{merge_tag}",
             "",
-            f"**信号强度**: {c['signal']}/10",
-            "",
-            f"**推理链**: {c['COT']}",
-            "",
         ])
+        # 子分行（与单篇格式一致，缺失则只写 signal）
+        if all(c.get(k) for k in ("transmission", "falsifiability", "history", "recency")):
+            lines.append(
+                f"**信号强度**: {c['signal']}/10  "
+                f"_(传导 {c['transmission']} · 证伪 {c['falsifiability']} · "
+                f"历史 {c['history']} · 时效 {c['recency']})_"
+            )
+        else:
+            lines.append(f"**信号强度**: {c['signal']}/10")
+        lines.extend(["", f"**推理链**: {c['COT']}", ""])
+        ev = str(c.get("evidence", "")).strip()
+        if ev:
+            lines.extend([f"**原文依据**: 「{ev}」", ""])
         if src_count > 1:
             lines.append(f"_来源 CoT id: {', '.join(c['_source_ids'])}_")
             lines.append("")
@@ -255,6 +276,42 @@ def merge_sector(sector: str, dry_run: bool = False) -> dict:
 
     merged_cots = result["merged_cots"]
     merged_groups = sum(1 for mc in merged_cots if len(mc.get("_source_ids", [])) > 1)
+
+    # 从源 CoT 回填子分 / 原文依据 / signal —— merger LLM 只产出 trigger/COT/signal/_source_ids，
+    # 不让它重打分（不可靠），而是取簇内最高 signal 那条的子分+原文依据，signal 也取簇内最高
+    id2cot = {c["_cot_id"]: c for c in cots}
+    _DIMS = ("transmission", "falsifiability", "history", "recency")
+    for mc in merged_cots:
+        srcs = [id2cot[sid] for sid in mc.get("_source_ids", []) if sid in id2cot]
+        if not srcs:
+            continue
+        def _sig(c):
+            try:
+                return int(c.get("signal", 0))
+            except (TypeError, ValueError):
+                return 0
+        rep = max(srcs, key=_sig)
+        mc["signal"] = str(max(_sig(c) for c in srcs))  # 信号取簇内最高
+        for k in _DIMS:
+            if rep.get(k):
+                mc[k] = rep[k]
+        # 原文依据：优先代表条，缺了就找簇内任一非空
+        ev = str(rep.get("evidence", "")).strip()
+        if not ev:
+            for c in srcs:
+                if str(c.get("evidence", "")).strip():
+                    ev = str(c["evidence"]).strip()
+                    break
+        if ev:
+            mc["evidence"] = ev
+
+    # 汇总该板块所有源文件的 tags（去重保序），写进合并文件 frontmatter
+    merged_tags, _seen = [], set()
+    for c in cots:
+        for t in c.get("_tags", []):
+            if t and t not in _seen:
+                _seen.add(t)
+                merged_tags.append(t)
 
     report = {
         "sector": sector,
@@ -281,7 +338,7 @@ def merge_sector(sector: str, dry_run: bool = False) -> dict:
     report["archived_files"] = [a.name for a in archived]
 
     # 写新合并文件
-    new_path = _write_merged_file(sector, merged_cots)
+    new_path = _write_merged_file(sector, merged_cots, tags=merged_tags)
     report["new_file"] = new_path.name
 
     return report

@@ -22,6 +22,12 @@ history_years = 5   # 回溯多少年财务数据
 auto_review_days = 90  # 多少天后自动触发回顾提醒
 
 [cot]
+# 提取 CoT 专用模型：提取是高价值低频调用，用 pro 提质；其余命令仍走 [agent] model。
+# 想省钱可改回 "deepseek-v4-flash" 或删掉本行（删掉则跟随 [agent] model）。
+extract_model = "deepseek-v4-pro"
+# 单块提取字符上限，超出自动按段落分块再汇总，不再静默截断丢失后半篇。
+max_chars = 100000
+
 [cot.score_weights]
 # signal = transmission*W_T + falsifiability*W_F + history*W_H + recency*W_R (自动归一化)
 # falsifiability(可证伪性)给足权重，才能把"一家之言"软论断压下去

@@ -690,7 +690,7 @@ def _ingest_one(fpath, ticker, sector, with_cot=True, force=False, user_comment=
             cot_file_rel = str(cot_path.relative_to(cot_path.parents[3]))
             print(f"  ✓ 提炼 {cot_count_out} 条 CoT → {cot_file_rel}")
             for i, c in enumerate(cots[:3], 1):
-                detail = f"(传导{c.get('transmission', '?')}·历史{c.get('history', '?')}·时效{c.get('recency', '?')})"
+                detail = f"(传导{c.get('transmission', '?')}·证伪{c.get('falsifiability', '?')}·历史{c.get('history', '?')}·时效{c.get('recency', '?')})"
                 print(f"    {i}. [{c['signal']}/10] {c['trigger']}  {detail}")
             if cot_count_out > 3:
                 print(f"    ... 还有 {cot_count_out - 3} 条")

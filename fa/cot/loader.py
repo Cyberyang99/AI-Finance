@@ -102,10 +102,14 @@ def _parse_cot_body(body: str) -> list[dict]:
                     "history": int(m_sub.group(2)),
                     "recency": int(m_sub.group(3)),
                 }
-        m_cot = re.search(r"\*\*推理链\*\*:\s*(.+?)(?=\n##|\Z)", block, re.DOTALL)
+        # 推理链：截到「原文依据」或下一条之前
+        m_cot = re.search(r"\*\*推理链\*\*:\s*(.+?)(?=\n\*\*原文依据\*\*|\n##|\Z)", block, re.DOTALL)
         cot_text = m_cot.group(1).strip() if m_cot else ""
+        # 原文依据（v3.1 起，可选）
+        m_ev = re.search(r"\*\*原文依据\*\*:\s*「(.+?)」", block, re.DOTALL)
+        evidence = m_ev.group(1).strip() if m_ev else ""
         if trigger and cot_text:
-            item = {"trigger": trigger, "COT": cot_text, "signal": signal}
+            item = {"trigger": trigger, "COT": cot_text, "signal": signal, "evidence": evidence}
             item.update(sub_scores)
             out.append(item)
     return out
