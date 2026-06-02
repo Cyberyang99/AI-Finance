@@ -47,6 +47,13 @@ DIMENSIONS: list[dict] = [
      "hint": "出现什么具体可观察的指标 → 证伪当前论点"},
     {"id": "risks",                 "name": "风险清单",          "is_json": False, "weight": 7,
      "hint": "每个风险的触发条件 + 量化的下跌空间"},
+    # ── 增强 3 维（12+3）──
+    {"id": "competitive_rating",    "name": "竞争优势评级",      "is_json": True,  "weight": 8,
+     "hint": "结构化打分：客户黏性/转换成本、规模效应、技术创新、牌照/政策、管理/文化 — 每项评『强/中/弱/无』+一句话依据"},
+    {"id": "growth_history",        "name": "成长史 / 关键战役",  "is_json": False, "weight": 5,
+     "hint": "护城河是怎么建起来的：创始人关键决策、如何拿下标杆客户(如 GE/米其林)、踩过的坑与翻盘点"},
+    {"id": "tracking_metrics",      "name": "跟踪指标 + 数据源",  "is_json": False, "weight": 6,
+     "hint": "持续验证论点的高频可观测指标，每条绑定数据源 + 触发含义（如『海外轮胎产能投放条数·公司公告·>预期则模具收入上修』）"},
 ]
 
 DIM_IDS = [d["id"] for d in DIMENSIONS]
@@ -80,6 +87,13 @@ JSON_SCHEMA_EXAMPLES = {
         {"event": "燃机厂商扩产计划上修", "window": "2026Q3", "monitor": "GEV/西门子季报"},
         {"event": "热端零件订单首次落地", "window": "2026H2", "monitor": "公司公告"},
     ],
+    "competitive_rating": {
+        "客户黏性/转换成本": {"rating": "中", "note": "绑定普利司通/米其林但非独家供应"},
+        "规模效应": {"rating": "中", "note": "全球第一但壁垒不强"},
+        "技术创新": {"rating": "弱", "note": "产品本身非强壁垒"},
+        "牌照/政策": {"rating": "无", "note": ""},
+        "管理/文化": {"rating": "强", "note": "利益排序+流程降本+员工持股，核心壁垒"},
+    },
 }
 
 

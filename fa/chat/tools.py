@@ -70,16 +70,35 @@ def _do_add_note(args: dict, state: dict) -> str:
         if not p.exists():
             return f"错误：文件不存在 {p}"
         ext = p.suffix.lower()
-        if ext in {".md", ".txt", ""}:
+        if ext in SUPPORTED_EXT:
+            # 研报文件 → 15 维深度 note（pdf/docx/pptx/xlsx/txt）
+            from ..note_extractor import extract_12d
+            from ..note_template import filled_dims
+            from ..ingest import save_note_12d
+            from ..sectors import classify_doc, display_sector
+            doc = ingest_file(p)
+            cls = classify_doc(doc["filename"], doc["text"], user_comment=comment)
+            sid = sector or cls.get("sector_id")
+            tags = cls.get("tags") or []
+            print(f"     抽 15 维 note...")
+            payload = extract_12d(ticker, doc["text"], comment)
+            filled = filled_dims(payload)
+            if not filled and not comment:
+                return "⚠ 15 维全空（文档信息不足或抽取失败，可换角度重试或检查文档）"
+            note_path = save_note_12d(ticker=ticker, payload=payload, sector=sid, tags=tags,
+                                      user_comment=comment, source_doc=doc["filename"])
+            state["last_ticker"] = ticker
+            if sid:
+                state["last_sector"] = sid
+            return (f"✓ 15 维 note 已保存 → {note_path.name}\n"
+                    f"  ticker={ticker} · sector={display_sector(sid) if sid else '(无)'} · "
+                    f"tags={'/'.join(tags) or '(无)'}\n"
+                    f"  填了 {len(filled)}/15 维: {', '.join(filled[:8])}"
+                    f"{'…' if len(filled) > 8 else ''}")
+        elif ext in {".md", ""}:
             raw_text = p.read_text(encoding="utf-8-sig")
             payload = raw_text if not comment else f"[评论] {comment}\n\n{raw_text}"
             extracted = auto_structure(ticker, payload)
-            structured.update(extracted)
-        elif ext in SUPPORTED_EXT:
-            doc = ingest_file(p)
-            raw_text = doc["text"]
-            source_doc = doc["filename"]
-            extracted = auto_structure_from_doc(ticker, raw_text, comment)
             structured.update(extracted)
         else:
             return f"错误：不支持的文件类型 {ext}"
