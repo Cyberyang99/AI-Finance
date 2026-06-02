@@ -128,6 +128,10 @@ def main():
     # notes
     pln = sub.add_parser("notes", help="列出用户论点")
     pln.add_argument("ticker", nargs="?", help="可选：只列某只票")
+    pln.add_argument("--retag", action="store_true",
+                     help="给存量 note 补 sector+tags（与 CoT 同分类，支持同业横向召回）")
+    pln.add_argument("--force", action="store_true", help="配合 --retag：连已有标签也重打")
+    pln.add_argument("--full", action="store_true", help="显示笔记全文（建议配合 ticker，看某票全部历史笔记）")
 
     # cot (P2) — CoT 选股工具
     pcot = sub.add_parser("cot", help="CoT 工具：list / score / vote")
@@ -176,6 +180,15 @@ def main():
     pcot_raw = cotsub.add_parser("raw", help="按 CoT 回溯归档的原始研报文件")
     pcot_raw.add_argument("query", help="cot_id 前缀 / source 文件名片段 / sector 名")
     pcot_raw.add_argument("--open", action="store_true", help="找到后用系统默认程序打开原文")
+
+    # vet - 逻辑校验器（合成层：用 CoT+note 审一只股/一个想法）
+    pvet = sub.add_parser("vet", help="逻辑校验器：输入个股(+可选想法)，用已有 CoT+note 打分/补充/写反逻辑")
+    pvet.add_argument("ticker", help="标的代码，如 2513.HK")
+    pvet.add_argument("-i", "--idea", default="",
+                      help="你的投资想法：内联文本，或 word/pdf/pptx/txt/md 文件路径(可选)")
+    pvet.add_argument("--cot-limit", type=int, default=15, help="召回 CoT 上限")
+    pvet.add_argument("--note-limit", type=int, default=5, help="召回同业 note 上限")
+    pvet.add_argument("--no-save", action="store_true", help="只打印不落盘")
 
     # dashboard
     sub.add_parser("dash", help="仪表盘")
@@ -229,6 +242,8 @@ def main():
         _cmd_notes(args)
     elif args.cmd == "cot":
         _cmd_cot(args)
+    elif args.cmd == "vet":
+        _cmd_vet(args)
     elif args.cmd == "dash":
         _cmd_dash()
     elif args.cmd == "sectors":
@@ -871,24 +886,35 @@ def _open_latest_note_in_editor(ticker: str):
 
 
 def _cmd_notes(args):
-    """列出用户论点."""
+    """列出用户论点（或 --retag 给存量补标签）."""
     from .ingest.user_note import load_user_notes
+
+    if getattr(args, "retag", False):
+        from .ingest.user_note import retag_all_notes
+        print("[NOTES] 给存量 note 补 sector+tags（调用分类器，需 LLM）...")
+        st = retag_all_notes(force=getattr(args, "force", False))
+        print(f"\n完成：打标 {st['tagged']} / 跳过 {st['skipped']} / 失败 {st['failed']}")
+        return
 
     notes = load_user_notes(args.ticker)
     if not notes:
         print(f"[NOTES] 无记录{f' (ticker={args.ticker})' if args.ticker else ''}")
         return
 
-    print(f"\n=== 用户论点 ({len(notes)} 条) ===\n")
+    full = getattr(args, "full", False)
+    print(f"\n=== 用户论点 ({len(notes)} 条{' · 全文' if full else ''}) ===\n")
     for n in notes:
-        # 第一行 frontmatter 之后的标题/摘要
         body = n["content"].split("---", 2)[-1].strip()
-        summary = body.split("\n")[0:6]
-        print(f"[{n['created_at']}] {n['ticker']}")
+        tagline = f"  [{n.get('sector','') or '未分类'} | {'/'.join(n.get('tags', [])) or '无标签'}]"
+        print(f"[{n['created_at']}] {n['ticker']}{tagline}")
         print(f"  {n['path']}")
-        for line in summary:
-            if line.strip():
-                print(f"  {line[:100]}")
+        if full:
+            for line in body.split("\n"):
+                print(f"  {line}")
+        else:
+            for line in body.split("\n")[0:6]:
+                if line.strip():
+                    print(f"  {line[:100]}")
         print()
 
 
@@ -1232,6 +1258,26 @@ def _cmd_cot_rescore(query: str, dry_run: bool = False):
         print(f"\n  去掉 --dry-run 真正写盘。")
     else:
         print(f"  ↺ 备份: {report.get('backup')}")
+
+
+def _cmd_vet(args):
+    """逻辑校验器：用已有 CoT + note 审一只股 / 一个想法。"""
+    from .vet import vet_stock
+
+    res = vet_stock(
+        args.ticker, idea=args.idea,
+        cot_limit=args.cot_limit, note_limit=args.note_limit,
+        save=not args.no_save,
+    )
+    if res.get("error"):
+        print(f"[VET] ✗ {res['error']}")
+        return
+    print("\n" + "=" * 60)
+    print(res["markdown"])
+    print("=" * 60)
+    if res.get("path"):
+        print(f"\n✓ 已落盘: {res['path']}")
+        print("  （未入 note 库；看过满意可自行 fa note 收录）")
 
 
 def _cmd_dash():

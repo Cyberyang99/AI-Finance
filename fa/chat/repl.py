@@ -310,6 +310,12 @@ HELP_TEXT = """\
   删掉曦智那份 CoT                  → delete_cot（软删除，可恢复）
   /tmp/茅台研报.pdf 给 600519 写笔记，重点产能稀缺
 
+快捷入口（引导式，不靠 LLM 猜意图）：
+  1 / 2 / 3 / 4  上传研报→CoT / 录入 note / vet 校验 / 查看库
+  m             调出快捷菜单
+  /cot <路径>   直接上传研报提炼 CoT
+  /vet <代码> [想法]  直接校验个股逻辑
+
 特殊命令：
   /reset        清空对话历史和状态
   /state        查看会话状态
@@ -341,6 +347,77 @@ def _confirm_tool_call(name: str, inp: dict) -> str:
         print("  请输入 y / n / q")
 
 
+QUICK_MENU = """常用快捷（输数字进引导式，或直接说话进自由对话）：
+  [1] 上传研报 → 提炼 CoT       [2] 上传 / 录入 个股 note
+  [3] vet 校验个股逻辑           [4] 查看 CoT / note 库
+  （随时输 m 调出本菜单 · /help 全部命令 · /quit 退出）"""
+
+
+def _ask(prompt: str):
+    """引导式单行输入；Ctrl-C / Ctrl-D / 空 q 视为取消，返回 None。"""
+    try:
+        v = input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\n  → 已取消")
+        return None
+    return None if v.lower() in ("q", "quit", "取消") else v
+
+
+def _quick_action(choice: str, state: dict) -> None:
+    """数字快捷 → 引导式确定性流程（不经 LLM 路由，消除上传歧义）。"""
+    from .tools import _do_ingest_doc, _do_add_note, _do_list_notes
+
+    if choice == "1":
+        print("  [上传研报 → 提炼 CoT]")
+        path = _ask("  文件路径 (pdf/pptx/docx/txt): ")
+        if not path:
+            return
+        comment = _ask("  一句话角度 / 重点 (可空): ") or ""
+        force = ((_ask("  该文件已提炼过则强制重抽? [y/N]: ") or "").lower() == "y")
+        print(_do_ingest_doc({"file_path": path, "comment": comment, "force": force}, state))
+
+    elif choice == "2":
+        print("  [上传 / 录入 个股 note]")
+        ticker = _ask("  股票代码或公司名: ")
+        if not ticker:
+            return
+        path = _ask("  文件路径 (可空；留空则手动写想法): ") or ""
+        if path:
+            comment = _ask("  一句话评论 / 角度 (可空): ") or ""
+            print(_do_add_note({"ticker": ticker, "file_path": path, "comment": comment}, state))
+        else:
+            msg = _ask("  你的论点 / 想法: ")
+            if not msg:
+                print("  → 空，已取消")
+                return
+            print(_do_add_note({"ticker": ticker, "message": msg}, state))
+
+    elif choice == "3":
+        print("  [vet 校验个股逻辑]")
+        ticker = _ask("  股票代码: ")
+        if not ticker:
+            return
+        idea = _ask("  你的想法 (可空；可贴 word/txt 文件路径): ") or ""
+        from ..vet import vet_stock
+        res = vet_stock(ticker, idea=idea)
+        if res.get("error"):
+            print(f"  ✗ {res['error']}")
+        else:
+            _say_assistant(res["markdown"])
+            if res.get("path"):
+                print(f"\n  ✓ 已落盘: {res['path']}（未入库，满意可自行收录）")
+
+    elif choice == "4":
+        print("  [知识库一览]")
+        try:
+            from ..cot import compute_stats, render_dashboard
+            st = compute_stats()
+            print(render_dashboard(st) if st["total_cots"] else "  CoT 库为空")
+        except Exception as e:
+            print(f"  CoT 统计失败: {e}")
+        print(_do_list_notes({}, state))
+
+
 def run_repl(model: str | None = None, max_iterations: int = 8):
     """启动 chat REPL。max_iterations: 单轮工具调用最大轮数（防死循环）。"""
     cfg = load_config().get("agent", {})
@@ -359,6 +436,7 @@ def run_repl(model: str | None = None, max_iterations: int = 8):
     session_file = SESSION_DIR / f"session_{datetime.now():%Y%m%d-%H%M%S}.json"
 
     _banner(model, mem_overview)
+    print("\n" + QUICK_MENU)
 
     while True:
         try:
@@ -447,6 +525,37 @@ def run_repl(model: str | None = None, max_iterations: int = 8):
                 print(f"[confirm 模式: {'开 — 每次工具调用前确认' if state['confirm_mode'] else '关 — 直跑'}]")
             else:
                 print(f"[当前 confirm: {'开' if state.get('confirm_mode') else '关'}]，用 /confirm on|off 切换")
+            continue
+
+        # ── 数字快捷 / 菜单（引导式确定性流程，避免 LLM 误判上传意图）──
+        if user_input in ("m", "menu", "/menu", "0"):
+            print(QUICK_MENU)
+            continue
+        if user_input in ("1", "2", "3", "4"):
+            _quick_action(user_input, state)
+            continue
+        # ── slash 快捷上传（熟练后直接用）──
+        if user_input.startswith("/cot"):
+            path = user_input[len("/cot"):].strip()
+            if path:
+                from .tools import _do_ingest_doc
+                print(_do_ingest_doc({"file_path": path}, state))
+            else:
+                print("用法: /cot <文件路径>")
+            continue
+        if user_input.startswith("/vet"):
+            rest = user_input[len("/vet"):].strip().split(maxsplit=1)
+            if not rest:
+                print("用法: /vet <股票代码> [想法]")
+            else:
+                from ..vet import vet_stock
+                r = vet_stock(rest[0], idea=(rest[1] if len(rest) > 1 else ""))
+                if r.get("error"):
+                    print(f"  ✗ {r['error']}")
+                else:
+                    _say_assistant(r["markdown"])
+                    if r.get("path"):
+                        print(f"\n  ✓ 已落盘: {r['path']}（未入库）")
             continue
 
         messages.append({"role": "user", "content": user_input})

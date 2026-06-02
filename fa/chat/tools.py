@@ -647,11 +647,15 @@ TOOLS_SPEC = [
     },
     {
         "name": "get_note",
-        "description": "返回某 ticker 的用户笔记全文（12 维度/核心论点）。用户问『我对 X 的看法/论点是什么』时用。",
+        "description": ("返回某 ticker 的用户笔记全文（12 维度/核心论点）。用户问『我对 X 的看法/论点是什么』时用。"
+                        "同一公司可能有多条不同日期的笔记（观点会随时间变）：默认给最新一条；"
+                        "用户说『看历史/之前怎么写的/观点怎么变的』传 all=true；要某天那条传 date。"),
         "input_schema": {
             "type": "object",
             "properties": {
                 "ticker": {"type": "string", "description": "股票代码或公司名，可空（默认最近 ticker）"},
+                "date": {"type": "string", "description": "YYYY-MM-DD，取该日期的历史笔记全文（可选）"},
+                "all": {"type": "boolean", "description": "true 时返回全部笔记（新→旧），用于看观点演变（可选）"},
             },
             "required": [],
         },
@@ -805,7 +809,10 @@ def _do_get_cot(args: dict, state: dict) -> str:
 
 
 def _do_get_note(args: dict, state: dict) -> str:
-    """返回某 ticker 的笔记全文。"""
+    """返回某 ticker 的笔记全文。
+
+    默认最新一条；date=YYYY-MM-DD 取指定历史那条；all=true 取全部（按时间倒序，看观点演变）。
+    """
     from ..ingest.user_note import load_user_notes
     ticker = _resolve_ticker(args.get("ticker"), state)
     if not ticker:
@@ -814,13 +821,34 @@ def _do_get_note(args: dict, state: dict) -> str:
     if not notes:
         return f"{ticker} 没有笔记"
     state["last_ticker"] = ticker
+
+    def _body(n):
+        return n["content"].split("---", 2)[-1].strip()
+
+    want_all = bool(args.get("all"))
+    want_date = (args.get("date") or "").strip()
+
+    if want_date:
+        hit = next((n for n in notes if n["created_at"] == want_date), None)
+        if not hit:
+            dates = ", ".join(n["created_at"] for n in notes)
+            return f"{ticker} 无 {want_date} 的笔记。已有日期: {dates}"
+        return f"=== {ticker} 笔记 [{want_date}]（共 {len(notes)} 条中的一条）===\n{_body(hit)}"
+
+    if want_all:
+        out = [f"=== {ticker} 全部笔记（{len(notes)} 条，新→旧，可见观点演变）==="]
+        for n in notes:
+            out.append(f"\n──── [{n['created_at']}] ────\n{_body(n)}")
+        return "\n".join(out)
+
+    # 默认：最新一条 + 提示如何看历史
     latest = notes[0]
-    body = latest["content"].split("---", 2)[-1].strip()
     head = f"=== {ticker} 笔记 [{latest['created_at']}]"
     if len(notes) > 1:
-        head += f"（共 {len(notes)} 条，展示最新一条；其余日期: {', '.join(n['created_at'] for n in notes[1:6])}）"
+        others = ", ".join(n["created_at"] for n in notes[1:6])
+        head += f"（共 {len(notes)} 条，展示最新；看历史用 date=日期 或 all=true。其余: {others}）"
     head += " ==="
-    return f"{head}\n{body}"
+    return f"{head}\n{_body(latest)}"
 
 
 # ── Block 4: 修改 / 合并 / 软删除 ──
