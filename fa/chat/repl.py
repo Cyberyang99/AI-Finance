@@ -373,8 +373,8 @@ def _quick_action(choice: str, state: dict) -> None:
         if not path:
             return
         comment = _ask("  一句话角度 / 重点 (可空): ") or ""
-        force = ((_ask("  该文件已提炼过则强制重抽? [y/N]: ") or "").lower() == "y")
-        print(_do_ingest_doc({"file_path": path, "comment": comment, "force": force}, state))
+        # 不再追问重抽：新文件直接提炼；已提炼过的会返回提示，需重抽用 /cot 或 CLI --force
+        print(_do_ingest_doc({"file_path": path, "comment": comment}, state))
 
     elif choice == "2":
         print("  [上传 / 录入 个股 note]")

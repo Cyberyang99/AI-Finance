@@ -100,12 +100,17 @@ def _do_add_note(args: dict, state: dict) -> str:
             raw_text=raw_text, sector=sector or None,
             user_comment=comment, source_doc=source_doc,
         )
+        # 读保存后实际分到的 sector/tags（save_user_note 内部会自动分类，本地 sector 变量可能为空）
+        from ..cot.loader import _parse_frontmatter, _parse_tags
+        fm = _parse_frontmatter(path.read_text(encoding="utf-8"))
+        saved_sector = fm.get("sector", "") or "(无)"
+        saved_tags = _parse_tags(fm.get("tags", ""))
         state["last_ticker"] = ticker
-        if sector:
-            state["last_sector"] = sector
+        if saved_sector and saved_sector != "(无)":
+            state["last_sector"] = saved_sector
         filled = [k for k, v in structured.items() if v]
         return (f"✓ 笔记已保存 → {path.name}\n"
-                f"  ticker={ticker}, sector={sector or '(无)'}\n"
+                f"  ticker={ticker} · sector={saved_sector} · tags={'/'.join(saved_tags) or '(无)'}\n"
                 f"  LLM 填充维度: {', '.join(filled) if filled else '(无)'}")
     except ValueError as e:
         return f"错误：{e}"
