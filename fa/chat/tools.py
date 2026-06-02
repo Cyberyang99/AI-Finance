@@ -55,8 +55,9 @@ def _do_add_note(args: dict, state: dict) -> str:
     if not ticker:
         return "错误：找不到 ticker。请先用 find_ticker 解析公司名，或直接给标准 ticker。"
 
+    from ..ingest import clean_user_path
     message = (args.get("message") or "").strip()
-    file_path = (args.get("file_path") or "").strip()
+    file_path = clean_user_path(args.get("file_path") or "")
     comment = (args.get("comment") or "").strip()
     sector = (args.get("sector") or "").strip() or state.get("last_sector")
 
@@ -140,7 +141,8 @@ def _do_ingest_doc(args: dict, state: dict) -> str:
     from ..memory.store import MemoryStore
     from ..sectors import classify_doc, resolve_alias, display_sector
 
-    file_path = (args.get("file_path") or "").strip()
+    from ..ingest import clean_user_path
+    file_path = clean_user_path(args.get("file_path") or "")
     if not file_path:
         return "错误：缺少 file_path"
     p = Path(file_path).expanduser().resolve()

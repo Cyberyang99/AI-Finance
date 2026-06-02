@@ -13,6 +13,21 @@ from .loaders.text import load_text
 SUPPORTED_EXT = {".pdf", ".docx", ".xlsx", ".xls", ".pptx", ".txt"}
 
 
+def clean_user_path(s: str) -> str:
+    """清洗用户输入/拖拽的文件路径。
+
+    - 去掉成对的引号（粘贴常见）
+    - 还原 shell 转义：`\\ ` → 空格、`\\(` → `(` 等（拖文件进终端会转义元字符）
+    - 只解「反斜杠+元字符」，不动「反斜杠+字母」，保住 Windows 路径分隔符 C:\\Users\\…
+    """
+    import re as _re
+    s = (s or "").strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        s = s[1:-1].strip()
+    s = _re.sub(r"\\([ ()\[\]&'\"!$#@`;|*?<>])", r"\1", s)
+    return s.strip()
+
+
 def file_hash(path: Path) -> str:
     """16 位 md5 截断，去重用。"""
     h = hashlib.md5()

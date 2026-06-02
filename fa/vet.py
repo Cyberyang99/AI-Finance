@@ -60,7 +60,8 @@ def load_idea(idea: str) -> str:
     """idea 可以是内联文本，或一个文件路径（docx/pdf/pptx/xlsx 走抽文器；txt/md 直接读）。"""
     if not idea or not idea.strip():
         return ""
-    p = Path(idea.strip()).expanduser()
+    from .ingest.base import clean_user_path
+    p = Path(clean_user_path(idea)).expanduser()
     if p.exists() and p.is_file():
         ext = p.suffix.lower()
         if ext in SUPPORTED_EXT:
