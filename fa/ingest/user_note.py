@@ -256,8 +256,10 @@ def save_user_note(
     raw_text: str = "",
     weight: float = 2.0,
     sector: Optional[str] = None,
+    tags: Optional[list] = None,
     user_comment: str = "",
     source_doc: str = "",
+    auto_classify: bool = True,
 ) -> Path:
     """保存用户论点到 memory/theses/user/<ticker>_<yyyy-mm-dd>.md.
 
@@ -279,12 +281,28 @@ def save_user_note(
     if not has_structured and not has_raw and not has_comment:
         raise ValueError("空论点：4 个维度、raw_text、user_comment 都为空")
 
+    # 自动分类：sector/tags 缺失时，用与 CoT 同一套分类器给 note 打标（支持同业横向召回）
+    tags = list(tags or [])
+    if auto_classify and (not sector or not tags):
+        try:
+            from ..sectors import classify_doc
+            blob = "\n".join(x for x in [user_comment, core_thesis, moat, raw_text] if x).strip()
+            if blob:
+                cls = classify_doc(f"{t}.md", blob, user_comment=user_comment)
+                sector = sector or cls.get("sector_id")
+                if not tags:
+                    tags = cls.get("tags") or []
+        except Exception as e:
+            print(f"  [note] 自动分类失败（不影响保存）: {e}")
+
     lines = [
         "---",
         f"ticker: {t}",
         f"sector: {sector or ''}",
-        f"source: user",
     ]
+    if tags:
+        lines.append(f"tags: [{', '.join(tags)}]")
+    lines.append("source: user")
     if source_doc:
         lines.append(f"source_doc: {source_doc}")
     if has_comment:
@@ -324,13 +342,77 @@ def save_user_note(
     return path
 
 
+def _rewrite_frontmatter_tags(text: str, sector: str, tags: list) -> str:
+    """在 note 文本里就地写入/替换 frontmatter 的 sector 与 tags，保留 body 与其它字段。"""
+    tags_line = f"tags: [{', '.join(tags)}]"
+    parts = text.split("---", 2)
+    if len(parts) < 3:  # 没有 frontmatter，补一个
+        return f"---\nticker: \nsector: {sector}\n{tags_line}\nsource: user\n---\n\n{text}"
+    out, seen_sector, seen_tags = [], False, False
+    for ln in parts[1].strip("\n").split("\n"):
+        if re.match(r"^\s*sector\s*:", ln):
+            out.append(f"sector: {sector}"); seen_sector = True
+        elif re.match(r"^\s*tags\s*:", ln):
+            if tags:
+                out.append(tags_line)
+            seen_tags = True
+        else:
+            out.append(ln)
+    if not seen_sector:
+        out.append(f"sector: {sector}")
+    if not seen_tags and tags:
+        out.append(tags_line)
+    return "---\n" + "\n".join(out) + "\n---" + parts[2]
+
+
+def retag_all_notes(force: bool = False) -> dict:
+    """给存量 note 补 sector+tags（与 CoT 同一套分类器）。
+
+    force=False 只补缺标签的；force=True 连已有标签也重打。返回 {tagged, skipped, failed}。
+    """
+    from ..sectors import classify_doc
+    from ..cot.loader import _parse_frontmatter, _parse_tags
+
+    stats = {"tagged": 0, "skipped": 0, "failed": 0}
+    if not USER_THESES_DIR.exists():
+        return stats
+    for p in sorted(USER_THESES_DIR.glob("*.md")):
+        if not re.match(r"^(.+?)_(\d{4}-\d{2}-\d{2})\.md$", p.name):
+            continue
+        try:
+            text = p.read_text(encoding="utf-8")
+        except Exception:
+            stats["failed"] += 1
+            continue
+        fm = _parse_frontmatter(text)
+        if fm.get("sector") and _parse_tags(fm.get("tags", "")) and not force:
+            stats["skipped"] += 1
+            continue
+        ticker = fm.get("ticker", p.stem)
+        body = text.split("---", 2)[-1]
+        try:
+            cls = classify_doc(f"{ticker}.md", body, user_comment=fm.get("user_comment", ""))
+        except Exception as e:
+            print(f"  [retag] {p.name} 分类失败: {e}")
+            stats["failed"] += 1
+            continue
+        sid = cls.get("sector_id") or fm.get("sector", "")
+        tags = cls.get("tags") or _parse_tags(fm.get("tags", ""))
+        p.write_text(_rewrite_frontmatter_tags(text, sid, tags), encoding="utf-8")
+        print(f"  ✓ {p.name} → {sid} {tags}")
+        stats["tagged"] += 1
+    return stats
+
+
 def load_user_notes(ticker: Optional[str] = None) -> list[dict]:
     """加载所有用户笔记。ticker 不空则过滤。
 
-    返回 list[{"ticker", "path", "created_at", "content"}]，按时间倒序。
+    返回 list[{"ticker", "path", "created_at", "content", "sector", "tags"}]，按时间倒序。
+    sector/tags 来自 frontmatter（与 CoT 同一套分类），未打标的为 "" / []。
     """
     if not USER_THESES_DIR.exists():
         return []
+    from ..cot.loader import _parse_frontmatter, _parse_tags
 
     out = []
     for p in USER_THESES_DIR.glob("*.md"):
@@ -345,11 +427,14 @@ def load_user_notes(ticker: Optional[str] = None) -> list[dict]:
             content = p.read_text(encoding="utf-8")
         except Exception:
             content = ""
+        fm = _parse_frontmatter(content)
         out.append({
             "ticker": t,
             "path": str(p),
             "created_at": d,
             "content": content,
+            "sector": fm.get("sector", ""),
+            "tags": _parse_tags(fm.get("tags", "")),
         })
     out.sort(key=lambda x: x["created_at"], reverse=True)
     return out

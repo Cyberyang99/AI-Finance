@@ -18,7 +18,7 @@ from typing import Optional
 from .base import SUPPORTED_EXT
 
 
-USER_NOTE_EXT = {".md", ".txt"}
+USER_NOTE_EXT = {".md"}   # .txt 归研报(走 CoT 提取)；用户笔记用 .md
 ALL_IMPORT_EXT = SUPPORTED_EXT | USER_NOTE_EXT
 
 

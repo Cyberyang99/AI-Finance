@@ -8,8 +8,9 @@ from .loaders.pdf import load_pdf
 from .loaders.docx import load_docx
 from .loaders.xlsx import load_xlsx
 from .loaders.pptx import load_pptx
+from .loaders.text import load_text
 
-SUPPORTED_EXT = {".pdf", ".docx", ".xlsx", ".xls", ".pptx"}
+SUPPORTED_EXT = {".pdf", ".docx", ".xlsx", ".xls", ".pptx", ".txt"}
 
 
 def file_hash(path: Path) -> str:
@@ -67,6 +68,8 @@ def ingest_file(path: str | Path) -> dict:
         text, pages = load_xlsx(p)
     elif ext == ".pptx":
         text, pages = load_pptx(p)
+    elif ext == ".txt":
+        text, pages = load_text(p)
     else:
         raise ValueError(f"未实现: {ext}")
 
