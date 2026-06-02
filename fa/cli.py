@@ -1235,31 +1235,59 @@ def _cmd_cot_rescore(query: str, dry_run: bool = False):
 
 
 def _cmd_dash():
+    """分层仪表盘：知识层（CoT + note，当前主战场）+ 决策层（论点→回顾闭环）。"""
+    from .cot import compute_stats
+    from .ingest.user_note import load_user_notes
+    from .sectors import get_sector
+
+    cot = compute_stats()
+    notes = load_user_notes()
     dash = store.dashboard()
     perf = performance.summary()
 
-    print("\n=== 基本面研究Agent 仪表盘 ===\n")
-    print(f"  活跃论点:     {dash['active_theses']} 只")
-    print(f"  待回顾:       {dash['reviews_due']} 只")
-    print(f"  板块知识:     {dash['sectors_known']} 个")
-    print(f"  沉淀模式:     {dash['patterns_found']} 个")
-    print(f"  最近回顾:     {dash['last_review']}")
+    print("\n══════════ 基本面研究 Agent 仪表盘 ══════════")
 
-    print("\n--- 主观评分（预测验证）---")
-    print(f"  预测准确率:   {dash['prediction_accuracy']}")
+    # ── 知识层 ──
+    print("\n【知识层】已沉淀的研究素材\n")
+    print(f"  📚 CoT 思维链:   {cot['total_cots']} 条 / {cot['total_files']} 份研报")
+    if cot["by_sector"]:
+        peak = max(n for _, n in cot["by_sector"])
+        print("       板块分布:")
+        for sid, n in cot["by_sector"]:
+            s = get_sector(sid)
+            name = s["name_cn"] if s else sid
+            bar = "▇" * max(1, round(n / peak * 16))
+            flag = "  ⚠未分类" if sid in ("uncategorized", "Uncategorized", "CapitalGoods") else ""
+            print(f"         {name:<12} {n:>3}  {bar}{flag}")
+    if cot["by_signal"]:
+        sig = "   ".join(f"{b.split()[0]}={n}" for b, n in cot["by_signal"])
+        print(f"       信号强度:   {sig}")
 
-    print("\n--- 客观评分（vs 大盘超额）---")
+    n_tickers = len({nt["ticker"] for nt in notes})
+    print(f"\n  📝 个股论点 note: {len(notes)} 份 / 覆盖 {n_tickers} 只个股")
+    if notes:
+        latest: dict = {}
+        for nt in notes:  # 已按日期倒序
+            latest.setdefault(nt["ticker"], nt["created_at"])
+        shown = list(latest.items())[:8]
+        print("       最近: " + "  ".join(f"{t}({d[5:]})" for t, d in shown))
+
+    # ── 决策层 ──
+    print("\n【决策层】建仓论点 → 预测 → 回顾闭环\n")
+    print(f"  🎯 建仓论点: {dash['active_theses']} 只      ⏳ 待回顾: {dash['reviews_due']} 只")
+    print(f"  🧩 沉淀模式: {dash['patterns_found']} 个      📁 板块知识: {dash['sectors_known']} 个")
+    print(f"  ⏰ 最近回顾: {dash['last_review']}      🔮 预测准确率: {dash['prediction_accuracy']}")
     if perf["total"] == 0:
-        print(f"  尚无评估记录。运行 fa review 触发首次评估。")
+        print("  📊 客观评分: 尚无评估记录")
     else:
-        win_rate = perf["win_rate"]
-        avg_ex = perf["avg_excess"]
-        print(f"  评估论点:     {perf['total']} 只 (其中 {perf['wins']} 只跑赢)")
-        print(f"  客观胜率:     {win_rate}%")
-        print(f"  平均超额:     {avg_ex:+.2f}%")
-        print(f"  平均客观分:   {perf['avg_objective_score']}")
-        print(f"  最佳:         {perf['best']['ticker']} ({perf['best']['excess']:+.2f}%)")
-        print(f"  最差:         {perf['worst']['ticker']} ({perf['worst']['excess']:+.2f}%)")
+        print(f"  📊 客观评分: {perf['total']} 只评估 / 胜率 {perf['win_rate']}% / "
+              f"平均超额 {perf['avg_excess']:+.2f}% / 最佳 {perf['best']['ticker']} "
+              f"({perf['best']['excess']:+.2f}%)")
+
+    # 闭环尚未真正启动时给出明确提示，避免拿测试数据撑场面
+    if dash["active_theses"] <= 1 and perf["total"] <= 1:
+        print("\n  ⚠ 论点→回顾闭环尚未正式开始（当前仅少量测试数据）。")
+        print("    流程：fa note 记录建仓论点 → 持有期 fa review 对预测做回顾验证。")
     print()
 
 

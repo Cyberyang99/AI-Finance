@@ -165,6 +165,13 @@ sectors:
     parent: RealEstate
     aliases: [房地产, 物业, REITs, real_estate, 商业地产, 住宅开发, 物业管理]
 
+  # ── 兜底（分类器拿不准时用，而非塞进 CapitalGoods）──
+  Uncategorized:
+    name_cn: 待分类
+    parent: Uncategorized
+    aliases: [待分类, 未分类, uncategorized, 其它, 杂项]
+    desc: 分类器无法确定 GICS 行业时的显式兜底，便于事后人工修正（不要污染真实行业）
+
   # ── 投资主题 (10 大用户研究主题) ──
   # 设计：每个主题颗粒度比 GICS 二级更细，专门反映投资视角；可多选。
   # 强制 LLM 选具体细分（如 AI 算力/存储/互联/大模型），不留"AI 总主题"粗匣。
@@ -301,7 +308,7 @@ sectors:
   Theme_Quantum:
     name_cn: 量子
     parent: Theme
-    aliases: [量子, 量子计算, 量子通信, 量子加密, quantum, 量子科技, 量子比特]
+    aliases: [量子, 量子计算, 量子通信, 量子加密, quantum, 量子科技, 量子比特, 量子信息, 量子计算机, 量子纠缠, 量子芯片, 量子传感, 超导量子, 离子阱, qubit]
 
   Theme_BioMedical:
     name_cn: 生物医药
@@ -312,8 +319,8 @@ sectors:
   Theme_Crypto:
     name_cn: 加密货币
     parent: Theme
-    aliases: [加密货币, 比特币, BTC, 以太坊, ETH, 区块链, web3, crypto, 稳定币, USDT, USDC, 矿机, 矿场, 数字资产, DeFi]
-    desc: 加密资产、稳定币、矿机、区块链基础设施
+    aliases: [加密货币, 比特币, BTC, 以太坊, ETH, 区块链, web3, crypto, 稳定币, stablecoin, USDT, USDC, 矿机, 矿场, 数字资产, DeFi, 数字人民币, 数字货币, 央行数字货币, CBDC, e-CNY, 微支付, 跨境支付, 加密支付, 数字钱包, RWA, 代币化, tokenization, token出海]
+    desc: 加密资产、稳定币 / 数字人民币 / CBDC、跨境与微支付、区块链基础设施、RWA 代币化
 
 # 同义词 fallback（自由文本里出现的、aliases 里没的，靠这个表兜底）
 # 仅当用户输入完整短语命中时强制归到对应 sector_id

@@ -154,6 +154,7 @@ def _do_ingest_doc(args: dict, state: dict) -> str:
     user_sector_hint_raw = (args.get("sector") or "").strip()
     user_tags_hint = list(args.get("tags") or [])
     comment = (args.get("comment") or "").strip()
+    force = bool(args.get("force"))
 
     # 如果用户给的 sector 其实是个主题（如"光模块"→Theme_AIInterconnect），
     # 当 tag 用，不要覆盖业务主板块归属
@@ -180,10 +181,16 @@ def _do_ingest_doc(args: dict, state: dict) -> str:
 
     store = MemoryStore()
     existing = [r for r in store.list_ingested(limit=10000) if r["file_hash"] == doc["hash"]]
-    if existing and existing[0].get("cot_count", 0) > 0:
+    if existing and existing[0].get("cot_count", 0) > 0 and not force:
         return (f"⚠ 这份文档之前已摄入并提炼过 {existing[0]['cot_count']} 条 CoT (hash 相同)。\n"
                 f"   原 CoT 文件: {existing[0].get('cot_file')}\n"
                 f"   想重新提炼请告诉我 'force 重抽'，或在终端跑 fa ingest <path> --force")
+    if existing and force and existing[0].get("cot_file"):
+        from ..memory.store import PROJECT_DIR
+        old_cot = PROJECT_DIR / "memory" / existing[0]["cot_file"]
+        if old_cot.exists():
+            old_cot.unlink()
+            print(f"           ↺ force 重抽：删除旧 CoT 文件 {old_cot.name}")
 
     # ── [2/6] 自动分类 ──
     print(f"     [2/6] 自动分类（GICS 主板块 + tags）...")
@@ -535,7 +542,8 @@ TOOLS_SPEC = [
                 "ticker": {"type": "string", "description": "股票代码（可选，默认用 last_ticker）"},
                 "sector": {"type": "string", "description": "主板块（**绝大多数情况不用填**，让自动分类器决定。只有用户明确说『归到 X 板块』才指定）"},
                 "tags": {"type": "array", "items": {"type": "string"}, "description": "用户额外想加的主题标签（可选；自动分类器会自己生成 tags，这里是补充）"},
-                "comment": {"type": "string", "description": "用户角度提示，LLM 提 CoT 时会优先围绕这个角度。用户的原始描述就是最好的 comment。"}
+                "comment": {"type": "string", "description": "用户角度提示，LLM 提 CoT 时会优先围绕这个角度。用户的原始描述就是最好的 comment。"},
+                "force": {"type": "boolean", "description": "强制重抽：该文档之前已提炼过 CoT 时，删旧的重新提炼。用户说『force 重抽』『重新提炼』『覆盖重跑』时传 true，默认 false。"}
             },
             "required": ["file_path"]
         },
