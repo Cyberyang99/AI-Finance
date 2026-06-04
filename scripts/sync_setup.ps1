@@ -3,8 +3,10 @@
 # Design:
 #   git-tracked stuff (framework/, sectors.yaml, README) stays in place.
 #   .gitignore'd private data (cot/, theses/user/, situations/*.md,
-#     agent.db, episodic/) is moved to OneDrive\AI-Finance-data\.
+#     episodic/, raw/) is moved to OneDrive\AI-Finance-data\.
 #     Original locations become symlinks/junctions.
+#   agent.db is NOT synced (WAL SQLite, corruption-prone over OneDrive; it's a
+#     derivative of cot/ and stays local per-machine).
 #
 # Usage:
 #   First machine (has the data):
@@ -31,12 +33,15 @@ param(
 $ErrorActionPreference = "Stop"
 
 # Subpaths inside memory/ to sync. Add/remove here.
+# NOTE: agent.db is intentionally EXCLUDED. It's a WAL-mode SQLite DB; syncing it over
+# OneDrive risks corruption, and it's only a derivative of the cot/ files (which ARE
+# synced). Each machine keeps its own local agent.db; nothing is lost if it's empty.
 $SyncItems = @(
-    "agent.db",
     "knowledge\cot",
     "theses\user",
     "episodic",
-    "situations"
+    "situations",
+    "raw"
 )
 
 function Write-Step($msg) { Write-Host "[$Mode] $msg" -ForegroundColor Cyan }
