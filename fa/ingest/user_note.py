@@ -24,6 +24,24 @@ from typing import Optional
 from ..memory.store import PROJECT_DIR
 
 USER_THESES_DIR = PROJECT_DIR / "memory" / "theses" / "user"
+# note 专属原文归档（独立于 CoT 的 memory/raw/）；放 user/ 下随 OneDrive 同步，
+# load_user_notes 用非递归 glob("*.md") 不会扫到这里。
+NOTE_RAW_DIR = USER_THESES_DIR / "_raw"
+
+
+def archive_note_raw(src_path, file_hash_val: str) -> str:
+    """把 note 的原始研报文件归档到 theses/user/_raw/<hash>_<原名>。
+
+    返回相对 theses/user/ 的路径（如 _raw/<hash>_<名>），写入 note frontmatter 的 raw_path。
+    同 hash 已归档则跳过拷贝。供回溯原文 + fa note --reextract 重抽。
+    """
+    import shutil
+    src = Path(src_path).expanduser()
+    NOTE_RAW_DIR.mkdir(parents=True, exist_ok=True)
+    dest = NOTE_RAW_DIR / f"{file_hash_val}_{src.name}"
+    if not dest.exists():
+        shutil.copy2(src, dest)
+    return f"_raw/{dest.name}"
 
 DIMENSIONS = [
     ("core_thesis", "核心论点（为什么看好/看坏，一两句话）"),
@@ -435,6 +453,8 @@ def load_user_notes(ticker: Optional[str] = None) -> list[dict]:
             "content": content,
             "sector": fm.get("sector", ""),
             "tags": _parse_tags(fm.get("tags", "")),
+            "raw_path": fm.get("raw_path", ""),
+            "source_doc": fm.get("source_doc", ""),
         })
     out.sort(key=lambda x: x["created_at"], reverse=True)
     return out
@@ -481,6 +501,7 @@ def save_note_12d(
     tags: Optional[list] = None,
     user_comment: str = "",
     source_doc: str = "",
+    raw_path: str = "",
     source: str = "user",
     weight: float = 2.0,
     confidence: str = "high",
@@ -515,6 +536,7 @@ def save_note_12d(
         created_at=today,
         user_comment=user_comment,
         source_doc=source_doc,
+        raw_path=raw_path,
         source=source,
         weight=weight,
         confidence=confidence,

@@ -124,6 +124,8 @@ def main():
                     help="打开 $EDITOR 编辑该 ticker 最新一条笔记")
     pn.add_argument("--append", action="store_true",
                     help="同日 note 已存在时追加到末尾而非覆盖（不重抽 12 维度，原文 + comment 直接附加）")
+    pn.add_argument("--reextract", action="store_true",
+                    help="对已有 raw_path 的 note，用最新 15 维提取器从归档原文重抽（模板升级后用）")
 
     # notes
     pln = sub.add_parser("notes", help="列出用户论点")
@@ -757,6 +759,33 @@ def _cmd_note(args):
         _open_latest_note_in_editor(ticker)
         return
 
+    # --reextract 分支：从归档原文用最新 15 维重抽
+    if getattr(args, "reextract", False):
+        from .ingest.user_note import load_user_notes, save_note_12d, NOTE_RAW_DIR
+        notes = [n for n in load_user_notes(ticker) if n.get("raw_path")]
+        if not notes:
+            print(f"[NOTE] {ticker} 没有带 raw_path 的 note（归档原文功能上线后摄入的才有）。")
+            return
+        n = notes[0]  # 最新一条
+        raw_fp = (NOTE_RAW_DIR.parent / n["raw_path"]).resolve()
+        if not raw_fp.exists():
+            print(f"[NOTE] 归档原文不在: {raw_fp}")
+            return
+        print(f"[NOTE] 从归档原文重抽 15 维: {raw_fp.name}")
+        doc = ingest_file(raw_fp)
+        payload = extract_12d(ticker, doc["text"], (args.comment or "").strip())
+        filled = filled_dims(payload)
+        if not filled:
+            print("[NOTE] 重抽后 15 维仍全空，已放弃（未覆盖原 note）。")
+            return
+        path = save_note_12d(
+            ticker=ticker, payload=payload, sector=n.get("sector") or None,
+            tags=n.get("tags") or [], source_doc=n.get("source_doc", ""),
+            raw_path=n["raw_path"], source="user_doc",
+        )
+        print(f"[NOTE] ✓ 重抽完成，填 {len(filled)}/15 维 → {path.name}")
+        return
+
     use_llm = not getattr(args, "no_structure", False)
     user_comment = (args.comment or "").strip() if getattr(args, "comment", None) else ""
     append_mode = bool(getattr(args, "append", False))
@@ -765,6 +794,7 @@ def _cmd_note(args):
     raw_text = ""
     source_doc = ""
     source = "user"
+    raw_rel = ""   # 原文归档相对路径（仅文档来源）
 
     if args.file:
         p = Path(args.file).expanduser().resolve()
@@ -792,6 +822,12 @@ def _cmd_note(args):
             source_doc = doc["filename"]
             source = "user_doc"
             print(f"[NOTE] 抽文成功: {len(raw_text)} 字 / {doc['pages']} 页")
+            from .ingest.user_note import archive_note_raw
+            try:
+                raw_rel = archive_note_raw(p, doc["hash"])
+                print(f"[NOTE] ✓ 原文归档 → {raw_rel}")
+            except Exception as e:
+                print(f"[NOTE] ⚠ 原文归档失败（不影响 note）: {e}")
         else:
             print(f"[NOTE] 不支持的文件类型: {ext}")
             return
@@ -855,6 +891,7 @@ def _cmd_note(args):
             tags=final_tags,
             user_comment=user_comment,
             source_doc=source_doc,
+            raw_path=raw_rel,
             source=source,
         )
         print(f"[NOTE] ✓ 已保存 → {path}")

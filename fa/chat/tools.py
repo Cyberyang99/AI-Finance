@@ -75,6 +75,7 @@ def _do_add_note(args: dict, state: dict) -> str:
             from ..note_extractor import extract_12d
             from ..note_template import filled_dims
             from ..ingest import save_note_12d
+            from ..ingest.user_note import archive_note_raw
             from ..sectors import classify_doc, display_sector
             doc = ingest_file(p)
             cls = classify_doc(doc["filename"], doc["text"], user_comment=comment)
@@ -85,8 +86,14 @@ def _do_add_note(args: dict, state: dict) -> str:
             filled = filled_dims(payload)
             if not filled and not comment:
                 return "⚠ 15 维全空（文档信息不足或抽取失败，可换角度重试或检查文档）"
+            # 归档原文（note 专属目录），供回溯 + 重抽
+            raw_rel = ""
+            try:
+                raw_rel = archive_note_raw(p, doc["hash"])
+            except Exception as e:
+                print(f"     ⚠ 原文归档失败（不影响 note）: {e}")
             note_path = save_note_12d(ticker=ticker, payload=payload, sector=sid, tags=tags,
-                                      user_comment=comment, source_doc=doc["filename"])
+                                      user_comment=comment, source_doc=doc["filename"], raw_path=raw_rel)
             state["last_ticker"] = ticker
             if sid:
                 state["last_sector"] = sid

@@ -139,6 +139,7 @@ def render_markdown(
     created_at: str = "",
     user_comment: str = "",
     source_doc: str = "",
+    raw_path: str = "",
     source: str = "user",
     weight: float = 2.0,
     confidence: str = "high",
@@ -146,6 +147,7 @@ def render_markdown(
     """把 payload 渲染成一份完整 markdown 文档（含 frontmatter）。
 
     JSON 字段同时写到 frontmatter（机器可读）和 body（人可读）。
+    raw_path: 原始文件归档相对路径（相对 theses/user/），供回溯/重抽。
     """
     tags_list = [t.strip() for t in (tags or []) if t and t.strip()]
     fm_lines = [
@@ -160,6 +162,8 @@ def render_markdown(
     ])
     if source_doc:
         fm_lines.append(f"source_doc: {source_doc}")
+    if raw_path:
+        fm_lines.append(f"raw_path: {raw_path}")
     if user_comment:
         fm_lines.append(f"user_comment: {user_comment.strip().replace(chr(10), ' ')}")
     fm_lines.extend([
