@@ -17,14 +17,20 @@ from .loader import COT_DIR, list_cot_files, _parse_frontmatter, _parse_cot_body
 
 
 def find_cot_file(query: str) -> Optional[Path]:
-    """按 cot_id 前缀 / source 文件名片段 / sector 名 模糊定位 CoT 文件。
+    """按 cot_id / source 文件名片段 / 标题或推理文本 / sector 名 模糊定位 CoT 文件。
 
-    优先级: source 片段 > sector 名 > cot_id 前缀。
+    优先级: source 片段 / cot_id > 标题·推理文本 > sector 名。
     多个匹配时返回最新修改的；无匹配返回 None。
+
+    注意 cot_id 形如 `<source_hash>_<n>`（n 是文件内第几条链），定位文件时尾部
+    `_<n>` 要先剥掉再和 source_hash 比，否则 search_memory/list_cot 给出的 id
+    传进来必然匹配不上（曾导致问答时反复重试、死循环）。
     """
     if not query:
         return None
     q = query.lower()
+    # 剥掉 cot_id 尾部的 `_<数字>`，得到用于匹配 source_hash 的纯 hash 段
+    q_hash = re.sub(r"_\d+$", "", q)
     files = list_cot_files()
     if not files:
         return None
@@ -45,13 +51,18 @@ def find_cot_file(query: str) -> Optional[Path]:
         source_hash = (fm.get("source_hash") or "").lower()
         # 2) source 文件名片段
         if q in source:
+            matches.append((fp, 3))
+            continue
+        # 3) source_hash（兼容传入完整 cot_id `<hash>_<n>`）
+        if source_hash and (q_hash == source_hash or q_hash in source_hash):
+            matches.append((fp, 3))
+            continue
+        # 4) 标题 / 推理文本片段（让"按 CoT 标题问"也能定位到文件）
+        body = text.split("---", 2)[-1]
+        if q in body.lower():
             matches.append((fp, 2))
             continue
-        # 3) source_hash 前缀（即 cot_id 前缀）
-        if q in source_hash:
-            matches.append((fp, 2))
-            continue
-        # 4) sector 名（最弱匹配，可能多个）
+        # 5) sector 名（最弱匹配，可能多个）
         if q in sector:
             matches.append((fp, 1))
 

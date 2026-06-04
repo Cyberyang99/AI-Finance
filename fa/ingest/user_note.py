@@ -310,6 +310,9 @@ def save_user_note(
                 sector = sector or cls.get("sector_id")
                 if not tags:
                     tags = cls.get("tags") or []
+                if cls.get("suggested_tags"):
+                    print(f"  [note] ⚠ 疑似新主题未归类: {cls['suggested_tags']} — 未自动建 tag。"
+                          f"如确需，请加入 memory/sectors.yaml 后重抽")
         except Exception as e:
             print(f"  [note] 自动分类失败（不影响保存）: {e}")
 
@@ -417,6 +420,8 @@ def retag_all_notes(force: bool = False) -> dict:
         sid = cls.get("sector_id") or fm.get("sector", "")
         tags = cls.get("tags") or _parse_tags(fm.get("tags", ""))
         p.write_text(_rewrite_frontmatter_tags(text, sid, tags), encoding="utf-8")
+        if cls.get("suggested_tags"):
+            print(f"  ⚠ {p.name} 疑似新主题未归类: {cls['suggested_tags']} — 如确需请加入 memory/sectors.yaml")
         print(f"  ✓ {p.name} → {sid} {tags}")
         stats["tagged"] += 1
     return stats

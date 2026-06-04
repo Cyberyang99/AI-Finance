@@ -681,6 +681,9 @@ def _ingest_one(fpath, ticker, sector, with_cot=True, force=False, user_comment=
         auto_tags = cls.get("tags") or []
         print(f"  ✓ 分类: {display_sector(final_sector)} "
               f"(置信度 {cls.get('confidence', '?')}) tags={auto_tags or '(无)'}")
+        if cls.get("suggested_tags"):
+            print(f"  ⚠ 疑似新主题未归类: {cls['suggested_tags']} — 未自动建 tag。"
+                  f"如确需，请加入 memory/sectors.yaml 后重抽")
         if cls.get("reasoning"):
             print(f"    理由: {cls['reasoning'][:120]}")
 

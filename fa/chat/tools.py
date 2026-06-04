@@ -81,6 +81,9 @@ def _do_add_note(args: dict, state: dict) -> str:
             cls = classify_doc(doc["filename"], doc["text"], user_comment=comment)
             sid = sector or cls.get("sector_id")
             tags = cls.get("tags") or []
+            if cls.get("suggested_tags"):
+                print(f"     ⚠ 疑似新主题未归类: {cls['suggested_tags']} — 未自动建 tag。"
+                      f"如确需，请加入 memory/sectors.yaml 后重抽")
             print(f"     抽 15 维 note...")
             payload = extract_12d(ticker, doc["text"], comment)
             filled = filled_dims(payload)
@@ -246,6 +249,9 @@ def _do_ingest_doc(args: dict, state: dict) -> str:
     print(f"           ✓ sector = {display_sector(sector_id)}")
     if tags:
         print(f"           ✓ tags   = {tags}")
+    if cls.get("suggested_tags"):
+        print(f"           ⚠ 疑似新主题未归类: {cls['suggested_tags']} — 未自动建 tag。"
+              f"如确需，请加入 memory/sectors.yaml 后重抽")
     if cls.get("reasoning"):
         print(f"           ℹ 理由: {cls['reasoning']}")
 
@@ -485,14 +491,27 @@ def _do_list_cot(args: dict, state: dict) -> str:
                 if keyword in f"{c.get('trigger','')} {c.get('COT','')}".lower()]
     if not cots:
         return f"无 CoT (sector={sector}, tag={tag}, min_signal={min_signal}, keyword={keyword or '无'})"
-    lines = [f"=== CoT 列表 ({len(cots)} 条) ==="]
-    for c in cots[:15]:
-        lines.append(f"  [{c['signal']}/10] {c['trigger']}")
+    full = bool(args.get("full"))
+    # full=true 时直接给完整推理链（含子分），省去逐条再 get_cot 的来回；
+    # 标题模式 cap 15，全文模式 cap 8（避免一次刷屏）。
+    cap = 8 if full else 15
+    cots.sort(key=lambda c: -int(c.get("signal", 0) or 0))
+    lines = [f"=== CoT 列表 ({len(cots)} 条{('，完整推理' if full else '')}) ==="]
+    for c in cots[:cap]:
         tags = c.get("_tags") or []
         theme = "、".join(tags) if tags else "(未打主题)"
-        lines.append(f"    主题={theme}  ·  行业={c['_sector']}")
-    if len(cots) > 15:
-        lines.append(f"... 还有 {len(cots) - 15} 条")
+        if full:
+            sub = ""
+            if all(k in c for k in ("transmission", "history", "recency")):
+                sub = f"  (传导{c['transmission']}·历史{c['history']}·时效{c['recency']})"
+            lines.append(f"\n[{c['signal']}/10] {c['trigger']}{sub}")
+            lines.append(f"  主题={theme} · 行业={c['_sector']} · 来源={c.get('_source','?')} · id={c.get('_cot_id','?')}")
+            lines.append(f"  {c.get('COT','').strip()}")
+        else:
+            lines.append(f"  [{c['signal']}/10] {c['trigger']}")
+            lines.append(f"    主题={theme}  ·  行业={c['_sector']}")
+    if len(cots) > cap:
+        lines.append(f"\n... 还有 {len(cots) - cap} 条（缩小 tag/提高 min_signal 或分批看）")
     if sector:
         state["last_sector"] = sector
     return "\n".join(lines)
@@ -609,14 +628,17 @@ TOOLS_SPEC = [
     },
     {
         "name": "list_cot",
-        "description": "列出已提炼的思维链 CoT。可按主板块 (sector) 或主题 (tag) 过滤；tag 是跨板块召回的关键能力。",
+        "description": ("列出已提炼的思维链 CoT。可按主板块 (sector) 或主题 (tag) 过滤；tag 是跨板块召回的关键能力。"
+                        "**用户要看某筛选集（如某主题 + 高分）的完整推理链时，直接传 full=true，一次返回全文，"
+                        "不要再逐条 get_cot。** 默认按 signal 倒序。"),
         "input_schema": {
             "type": "object",
             "properties": {
                 "sector": {"type": "string", "description": "主板块 (sector_id 或别名)，例：CapitalGoods / 半导体"},
                 "tag": {"type": "string", "description": "主题 tag，跨板块召回。例：'AI 主题' / '燃气轮机'"},
                 "min_signal": {"type": "integer", "description": "信号强度下限 1-10"},
-                "keyword": {"type": "string", "description": "在 trigger+正文里再做关键词过滤（可选）"}
+                "keyword": {"type": "string", "description": "在 trigger+正文里再做关键词过滤（可选）"},
+                "full": {"type": "boolean", "description": "true 则输出每条的完整推理链 + 子分（最多 8 条），否则只列标题（最多 15 条）"}
             },
             "required": []
         },
@@ -788,6 +810,13 @@ def _do_search_memory(args: dict, state: dict) -> str:
         return "错误：缺少 query"
     scope = (args.get("scope") or "all").lower()
     ql = q.lower()
+    # 按空格分词，全部命中才算（AND）；单词查询即退化为原来的子串匹配。
+    # 修复：多词查询（如"云计算 涨价 毛利率"）整串永远不是连续子串，过去必然落空。
+    tokens = [t for t in ql.split() if t]
+
+    def _hit(hay: str) -> bool:
+        return all(tok in hay for tok in tokens) if tokens else False
+
     limit = int(args.get("limit") or 12)
     lines = []
 
@@ -795,7 +824,7 @@ def _do_search_memory(args: dict, state: dict) -> str:
         cot_hits = []
         for c in load_cots():
             hay = f"{c.get('trigger','')} {c.get('COT','')} {' '.join(c.get('_tags') or [])} {c.get('_source','')}".lower()
-            if ql in hay:
+            if _hit(hay):
                 cot_hits.append(c)
         cot_hits.sort(key=lambda c: -int(c.get("signal", 0) or 0))
         if cot_hits:
@@ -809,14 +838,14 @@ def _do_search_memory(args: dict, state: dict) -> str:
                 lines.append(f"    {snippet}{'...' if len(c.get('COT',''))>120 else ''}")
 
     if scope in ("all", "note"):
-        note_hits = [n for n in load_user_notes() if ql in n["content"].lower()]
+        note_hits = [n for n in load_user_notes() if _hit(n["content"].lower())]
         if note_hits:
             lines.append(f"\n=== 笔记命中 {len(note_hits)} 条 ===")
             for n in note_hits[:limit]:
                 # 抓含关键词的那一行做片段
                 snippet = ""
                 for ln in n["content"].split("\n"):
-                    if ql in ln.lower() and ln.strip() and not ln.startswith("#"):
+                    if ln.strip() and not ln.startswith("#") and any(tok in ln.lower() for tok in tokens):
                         snippet = ln.strip()[:120]
                         break
                 lines.append(f"  [{n['created_at']}] {n['ticker']}  {snippet}")
