@@ -71,7 +71,9 @@ def load_docx(path: Path) -> tuple[str, int]:
         text = p.text.strip()
         if not text:
             continue
-        style = (p.style.name or "").lower()
+        # 程序生成的 docx 段落可能引用未定义样式 → p.style 为 None，
+        # 用 getattr 安全取名，取不到就当普通正文处理（不丢内容）。
+        style = (getattr(p.style, "name", None) or "").lower()
         if "heading 1" in style:
             parts.append(f"# {text}")
         elif "heading 2" in style:
