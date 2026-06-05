@@ -222,6 +222,17 @@ def _write_merged_file(sector: str, merged_cots: list[dict],
         f"cot_count: {len(merged_cots)}",
         f"is_merged: true",
     ]
+    # 汇总所有源报告 hash（从每条链 _source_ids 的 <hash>_<n> 取 hash 段去重），
+    # 供 `fa cot raw` 从合并文件回溯到每份原始研报（修"合并后追溯断"）。
+    src_hashes, _seen_h = [], set()
+    for c in merged_cots:
+        for sid in c.get("_source_ids", []):
+            h = re.sub(r"_\d+$", "", str(sid))
+            if h and h not in _seen_h and not h.startswith("merged"):
+                _seen_h.add(h)
+                src_hashes.append(h)
+    if src_hashes:
+        lines.append(f"source_hashes: [{', '.join(src_hashes)}]")
     tags = [t for t in (tags or []) if t]
     if tags:
         lines.append(f"tags: [{', '.join(tags)}]")
@@ -242,6 +253,10 @@ def _write_merged_file(sector: str, merged_cots: list[dict],
             f"## CoT {i} — {c['trigger']}{merge_tag}",
             "",
         ])
+        chain_tags = [t for t in (c.get("tags") or []) if t]
+        if chain_tags:
+            lines.append(f"**主题**: {'、'.join(chain_tags)}")
+            lines.append("")
         # 子分行（与单篇格式一致，缺失则只写 signal）
         if all(c.get(k) for k in ("transmission", "falsifiability", "history", "recency")):
             lines.append(
@@ -285,6 +300,14 @@ def merge_sector(sector: str, dry_run: bool = False) -> dict:
         srcs = [id2cot[sid] for sid in mc.get("_source_ids", []) if sid in id2cot]
         if not srcs:
             continue
+        # 链级主题：合并链的 tag = 各来源链 tag 的并集（不再用整 sector tag 并集，避免跨主题污染）
+        ctags, _ct_seen = [], set()
+        for c in srcs:
+            for t in (c.get("_tags") or []):
+                if t and t not in _ct_seen:
+                    _ct_seen.add(t)
+                    ctags.append(t)
+        mc["tags"] = ctags
         def _sig(c):
             try:
                 return int(c.get("signal", 0))

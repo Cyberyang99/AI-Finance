@@ -515,7 +515,16 @@ def save_cot_file(cots: list[dict], ticker: Optional[str], sector: Optional[str]
     fname = f"{yyyymm}_{source_hash}_{safe_stem}.md"
     path = target_dir / fname
 
-    tags_list = _normalize_incoming_tags(tags or [])
+    # 文档级 frontmatter tags = 传入 tags，或各链链级 tag 的并集（向后兼容 + dash/概览用）
+    union = list(tags or [])
+    if not union:
+        _seen_u = set()
+        for c in cots:
+            for t in (c.get("tags") or []):
+                if t and t not in _seen_u:
+                    _seen_u.add(t)
+                    union.append(t)
+    tags_list = _normalize_incoming_tags(union)
 
     lines = [
         "---",
@@ -555,9 +564,13 @@ def save_cot_file(cots: list[dict], ticker: Optional[str], sector: Optional[str]
             "",
         ])
     for i, c in enumerate(cots, 1):
+        lines.append(f"## CoT {i} — {c['trigger']}")
+        lines.append("")
+        chain_tags = [t for t in (c.get("tags") or []) if t]
+        if chain_tags:
+            lines.append(f"**主题**: {'、'.join(chain_tags)}")
+            lines.append("")
         lines.extend([
-            f"## CoT {i} — {c['trigger']}",
-            "",
             f"**信号强度**: {c['signal']}/10  "
             f"_(传导 {c.get('transmission', '?')} · 证伪 {c.get('falsifiability', '?')} · "
             f"历史 {c.get('history', '?')} · 时效 {c.get('recency', '?')})_",

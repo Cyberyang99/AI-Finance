@@ -82,6 +82,11 @@ def _parse_cot_body(body: str) -> list[dict]:
             continue
         m_trig = re.match(r"^## CoT \d+ — (.+?)$", block.split("\n", 1)[0])
         trigger = m_trig.group(1).strip() if m_trig else ""
+        # 链级主题 tag（**主题**: a、b），v4 起；旧文件无此行 → chain_tag_line=False，由 load_cots 回退文件级
+        m_ctag = re.search(r"^\*\*主题\*\*:\s*(.+)$", block, re.MULTILINE)
+        chain_tag_line = m_ctag is not None
+        chain_tags = ([t.strip() for t in re.split(r"[、,，]", m_ctag.group(1).strip()) if t.strip()]
+                      if m_ctag else [])
         m_sig = re.search(r"\*\*信号强度\*\*:\s*(\d+)\s*/\s*10", block)
         signal = m_sig.group(1) if m_sig else "5"
         # 子分（可选）。v3 含「证伪」；兼容 v2 旧格式（无证伪）
@@ -108,8 +113,16 @@ def _parse_cot_body(body: str) -> list[dict]:
         # 原文依据（v3.1 起，可选）
         m_ev = re.search(r"\*\*原文依据\*\*:\s*「(.+?)」", block, re.DOTALL)
         evidence = m_ev.group(1).strip() if m_ev else ""
+        # 合并链的来源 cot id（merged 文件写了 `_来源 CoT id: a, b_`），用于回溯原文。
+        # 整行匹配后再去掉尾部斜体下划线——cot_id 本身含 `_`，不能用 `.+?_` 非贪婪（会截断）。
+        m_src = re.search(r"(?m)^_来源 CoT id:\s*(.+)$", block)
+        source_ids = ([s.strip() for s in m_src.group(1).rstrip("_").split(",") if s.strip()]
+                      if m_src else [])
         if trigger and cot_text:
-            item = {"trigger": trigger, "COT": cot_text, "signal": signal, "evidence": evidence}
+            item = {"trigger": trigger, "COT": cot_text, "signal": signal, "evidence": evidence,
+                    "_chain_tags": chain_tags, "_chain_tag_line": chain_tag_line}
+            if source_ids:
+                item["_source_ids"] = source_ids
             item.update(sub_scores)
             out.append(item)
     return out
@@ -143,16 +156,24 @@ def load_cots(sector: Optional[str] = None, ticker: Optional[str] = None,
         if ticker and fm.get("ticker") and fm["ticker"] != ticker:
             continue
         file_tags = _parse_tags(fm.get("tags", ""))
+        # 文件级预过滤（frontmatter tags 是各链 tag 的并集，是有效快路径）
         if target_tag and not any(target_tag in t.lower() for t in file_tags):
             continue
         body = text.split("---", 2)[-1]
         cots = _parse_cot_body(body)
+        # 文件是否启用了链级 tag：任一条链带 **主题** 行即为是
+        file_chain_tagged = any(c.get("_chain_tag_line") for c in cots)
         for i, c in enumerate(cots, 1):
             try:
                 sig_n = int(c["signal"])
             except ValueError:
                 sig_n = 5
             if sig_n < min_signal:
+                continue
+            # 有效 tag：链级标注的文件以链为准，旧文件回退文件级
+            eff_tags = (c.get("_chain_tags") or []) if file_chain_tagged else file_tags
+            # 链级精过滤：讲硬件的链不会再被「AI 大模型与云」之类的文件 tag 误召回
+            if target_tag and not any(target_tag in t.lower() for t in eff_tags):
                 continue
             try:
                 quality_rating = int(fm.get("quality_rating", 0))
@@ -163,7 +184,7 @@ def load_cots(sector: Optional[str] = None, ticker: Optional[str] = None,
                 "_source": fm.get("source", fp.name),
                 "_sector": fm.get("sector", ""),
                 "_ticker": fm.get("ticker", ""),
-                "_tags": file_tags,
+                "_tags": eff_tags,
                 "_created_at": fm.get("created_at", ""),
                 "_cot_id": f"{fm.get('source_hash', fp.stem)}_{i}",
                 "_quality_rating": quality_rating,

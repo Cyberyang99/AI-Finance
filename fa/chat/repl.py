@@ -12,6 +12,7 @@
 from __future__ import annotations
 import json
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -438,6 +439,62 @@ def _quick_action(choice: str, state: dict) -> None:
         print(_do_list_notes({}, state))
 
 
+# ── 上传意图询问（问题3：路径+无明确意图 → 先问 CoT/note/both，减少误操作）──
+
+_DOC_EXT = r"(?:pdf|pptx|ppt|docx|doc|xlsx|xls|md|txt)"
+_COT_INTENT = ("cot", "思维链", "逻辑链", "提炼", "提链", "提取链")
+_NOTE_INTENT = ("笔记", "note", "论点", "看法", "观点")
+_BOTH_INTENT = ("都要", "都提", "两个都", "both", "二者都", "都做", "全都要")
+
+
+def _extract_file_path(text: str) -> str | None:
+    """从自由文本里抓一个文档路径。先认引号包裹（支持空格），再认无空格 token。"""
+    m = re.search(r'["\'](.+?\.' + _DOC_EXT + r')["\']', text, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    m = re.search(r'(\S+\.' + _DOC_EXT + r')', text, re.IGNORECASE)
+    return m.group(1).strip() if m else None
+
+
+def _has_upload_intent_word(text: str) -> bool:
+    t = text.lower()
+    return any(w in t for w in _COT_INTENT + _NOTE_INTENT + _BOTH_INTENT)
+
+
+def _handle_upload_intent(user_input: str, state: dict) -> bool:
+    """命中"给了文件路径但没说要 CoT/note"时，弹三选一再分派；返回 True 表示已处理。
+
+    意图明确（含 CoT/note/both 关键词）或没有文件路径 → 返回 False，交回 LLM 主循环。
+    """
+    path = _extract_file_path(user_input)
+    if not path or _has_upload_intent_word(user_input):
+        return False
+
+    from .tools import _do_ingest_doc, _do_add_note
+    # 把路径从原文里抠掉，剩下的当作角度/评论传给下游
+    comment = re.sub(r'["\']?' + re.escape(path) + r'["\']?', "", user_input).strip()
+
+    _say(f"  检测到文件：{path}", style="cyan")
+    choice = _ask("  这份要做什么？[1] 提炼 CoT  [2] 录入 note  [3] 两者都要  (回车=1，q 取消) ")
+    if choice is None:
+        print("  → 已取消")
+        return True
+    choice = choice or "1"
+    if choice not in ("1", "2", "3"):
+        print("  → 无效选择，已取消（可重新发送，或直接说『提 CoT』/『写笔记』跳过此问）")
+        return True
+
+    if choice in ("1", "3"):
+        print(_do_ingest_doc({"file_path": path, "comment": comment}, state))
+    if choice in ("2", "3"):
+        ticker = _ask("  录入 note 需要标的，请给股票代码或公司名: ")
+        if ticker:
+            print(_do_add_note({"ticker": ticker, "file_path": path, "comment": comment}, state))
+        else:
+            print("  → 未给标的，note 部分已跳过")
+    return True
+
+
 def run_repl(model: str | None = None, max_iterations: int = 8):
     """启动 chat REPL。max_iterations: 单轮工具调用最大轮数（防死循环）。"""
     cfg = load_config().get("agent", {})
@@ -584,6 +641,10 @@ def run_repl(model: str | None = None, max_iterations: int = 8):
                     _say_assistant(r["markdown"])
                     if r.get("path"):
                         print(f"\n  ✓ 已落盘: {r['path']}（未入库）")
+            continue
+
+        # 上传意图询问：给了文件路径但没说要 CoT/note → 先问再做（不静默默认）
+        if _handle_upload_intent(user_input, state):
             continue
 
         messages.append({"role": "user", "content": user_input})

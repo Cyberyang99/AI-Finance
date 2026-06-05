@@ -306,6 +306,150 @@ def classify_doc(
     }
 
 
+CLASSIFY_CHAINS_SYSTEM = """你是投资思维链的主题归类员。任务：给每一条 CoT（思维链）从给定的封闭主题清单里挑 0-2 个最贴合的主题。"""
+
+CLASSIFY_CHAINS_USER = """## 主题清单（只能从这里选，用 name_cn；不要创造新主题）
+
+{theme_list}
+
+## 待归类的 CoT 列表（共 {n} 条）
+
+{chain_list}
+
+## 规则
+1. 给每条 CoT 标 0-2 个主题。**tags 必须逐字写清单里的 name_cn 原文**，不要写描述性短语、不要加斜杠组合、不要造词（错误示例：「数字人民币 / 央行数字货币」「IPO/解禁节奏」；正确：「加密货币」）。
+2. **按这条 CoT 本身讲的内容打主题，不要受同一份报告里其它条目影响**——讲光模块/算力芯片/铜缆的就打「AI 算力」「AI 互联」，讲大模型/云服务/Agent 的才打「AI 大模型与云」。一条只讲硬件的，不要附带打「AI 大模型与云」。
+3. 常见映射（把具体话题归到清单主题）：
+   - 数字人民币 / 稳定币 / 央行数字货币 / 跨境支付 / mBridge → 加密货币
+   - 光模块 / CPO / 铜缆 / 交换机 / 互联 → AI 互联；算力芯片 / GPU / 租赁 / 数据中心 → AI 算力；存储 / HBM / 闪存 → AI 存储
+   - 世界模型 / 具身智能 / 大模型 / AI 应用 / AI 云 / Agent → AI 大模型与云；人形机器人 / 灵巧手 → 机器人
+   - 量子计算 / 量子信息 / 量子通信 → 量子；风光 / 储能 / 电网 / 燃气轮机 → 电力能源及设备
+4. 清单里实在没有任何贴合主题的（如纯讲某公司 IPO/估值/解禁），这条 tags 给空数组 []，并把疑似新主题放进顶层 suggested（不要硬塞进 tags）。
+5. 严禁用公司名/股票代码当主题。
+
+## 输出格式（严格 JSON，不要 markdown 代码块）
+{{
+  "assignments": [
+    {{"i": 1, "tags": ["<主题>"]}},
+    {{"i": 2, "tags": ["<主题1>", "<主题2>"]}}
+  ],
+  "suggested": ["<清单外的疑似新主题，可空>"]
+}}
+只输出 JSON。"""
+
+
+def classify_chains(cots: list, doc_context: str = "", user_comment: str = "") -> dict:
+    """给每条 CoT 单独打主题 tag（链级），从封闭主题词表里选；越界词收进 suggested_tags。
+
+    同时服务新摄入与存量回填。返回
+    {"chain_tags": [[str,...] × len(cots)], "suggested_tags": [str,...]}。
+    LLM/解析失败时 chain_tags 全空（不阻塞，调用方可回退文档级 tag）。
+    """
+    from .config import load_config, make_anthropic_client
+    n = len(cots)
+    if n == 0:
+        return {"chain_tags": [], "suggested_tags": []}
+    empty = {"chain_tags": [[] for _ in range(n)], "suggested_tags": []}
+
+    theme_list_str = "\n".join(
+        f"- {s['name_cn']}  -- 关键词: {', '.join(s.get('aliases', [])[:5])}"
+        for s in list_themes()
+    )
+    chain_lines = []
+    for i, c in enumerate(cots, 1):
+        cot_brief = str(c.get("COT", "")).replace("\n", " ")[:140]
+        chain_lines.append(f"[{i}] trigger: {c.get('trigger','')}\n    COT: {cot_brief}")
+    chain_list_str = "\n".join(chain_lines)
+
+    cfg = load_config().get("agent", {})
+    model = cfg.get("model", "deepseek-v4-flash")
+    ctx_hint = (f"（资料背景: {doc_context}"
+                f"{'；用户角度: ' + user_comment if user_comment else ''}）\n\n"
+                if (doc_context or user_comment) else "")
+    user_content = ctx_hint + CLASSIFY_CHAINS_USER.format(
+        theme_list=theme_list_str, n=n, chain_list=chain_list_str)
+    # 输出按链数放大额度，避免多链时 JSON 被 max_tokens 截断（曾导致回填整文件落空）
+    out_budget = min(8000, 1200 + n * 180)
+
+    try:
+        client = make_anthropic_client()
+    except Exception as e:
+        print(f"  [classify_chains] 客户端初始化失败 (graceful): {e}")
+        return empty
+
+    # flash 对结构化输出有方差（同一文件两次跑结果可能空/非空）。重试至至少一条链拿到
+    # 有效 tag；合法全空的文件（纯讲某公司 IPO/估值）最多试 3 次后接受空结果，由调用方防丢。
+    best = empty
+    for attempt in range(3):
+        try:
+            resp = client.messages.create(
+                model=model, max_tokens=out_budget, system=CLASSIFY_CHAINS_SYSTEM,
+                messages=[{"role": "user", "content": user_content}],
+            )
+            out_text = "".join(b.text for b in resp.content if b.type == "text")
+        except Exception as e:
+            print(f"  [classify_chains] LLM 调用失败 (attempt {attempt+1}/3): {e}")
+            continue
+        result = _process_chain_output(out_text, n)
+        if any(result["chain_tags"]):
+            return result
+        if result["suggested_tags"] and not best["suggested_tags"]:
+            best = result  # 留住 suggested 供提示，继续重试
+    return best
+
+
+def _process_chain_output(out_text: str, n: int) -> dict:
+    """解析 classify_chains 的 LLM 输出（截断兜底 + 闭合词表守门），返回 {chain_tags, suggested_tags}。"""
+    parsed = _parse_json(out_text)
+    assignments = (parsed.get("assignments") if isinstance(parsed, dict) else None) or []
+    if not assignments:
+        # 截断/非标准 JSON 兜底：正则逐条捞 {"i": N, "tags": [...]}（外层数组未闭合也能救回）
+        assignments = _salvage_chain_assignments(out_text)
+
+    chain_tags = [[] for _ in range(n)]
+    suggested, _seen_s = [], set()
+
+    def _stash(t: str):
+        t = str(t).strip()
+        if t and t not in _seen_s:
+            _seen_s.add(t)
+            suggested.append(t)
+
+    for a in assignments:
+        if not isinstance(a, dict):
+            continue
+        try:
+            idx = int(a.get("i", a.get("index", 0))) - 1
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= idx < n):
+            continue
+        accepted = []
+        for t in (a.get("tags") or []):
+            canon = _valid_theme_tag(str(t))
+            if canon:
+                if canon not in accepted:
+                    accepted.append(canon)
+            else:
+                _stash(t)
+        chain_tags[idx] = accepted[:2]
+    for t in ((parsed.get("suggested") if isinstance(parsed, dict) else None) or []):
+        _stash(t)
+    return {"chain_tags": chain_tags, "suggested_tags": suggested}
+
+
+def _salvage_chain_assignments(text: str) -> list:
+    """从可能被截断/不规范的 JSON 文本里逐条捞 {"i": N, "tags": [...]}。
+
+    每个完整的 assignment 对象独立匹配，即使外层数组未闭合也能救回大部分。
+    """
+    out = []
+    for m in re.finditer(r'"i"\s*:\s*(\d+)\s*,\s*"tags"\s*:\s*\[([^\]]*)\]', text):
+        out.append({"i": int(m.group(1)),
+                    "tags": re.findall(r'"([^"]+)"', m.group(2))})
+    return out
+
+
 def display_sector(sid: str) -> str:
     """sid → '资本品 (Industrials.CapitalGoods)' 这种好读形式。"""
     s = get_sector(sid)

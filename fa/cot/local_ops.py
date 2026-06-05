@@ -116,6 +116,139 @@ def render_file_full(query: str) -> dict:
     }
 
 
+def _rewrite_with_chain_tags(text: str, chain_tags: list, union: list) -> str:
+    """把链级 tag 写回单个 CoT 文件全文：
+
+    1. frontmatter `tags:` 改为 union（各链 tag 的并集，作为文件级快路径过滤的超集）
+    2. 每条 `## CoT N —` 标题后插入/替换 `**主题**: a、b` 行（空 tag 的链不插）
+
+    保留其余所有内容（信号、推理链、原文依据、来源 id 等）不动。
+    """
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return text  # 非预期格式，不动
+    pre, fm_str, body = parts[0], parts[1], parts[2]
+
+    # 1) frontmatter tags 行
+    fm_lines = fm_str.split("\n")
+    out_fm, has_tags = [], False
+    for ln in fm_lines:
+        if re.match(r"^\s*tags\s*:", ln):
+            has_tags = True
+            if union:
+                out_fm.append(f"tags: [{', '.join(union)}]")
+            # union 空则丢弃该行（调用方已保证不会无谓清空）
+        else:
+            out_fm.append(ln)
+    if not has_tags and union:
+        # 没有 tags 行：插在 cot_count / source_hash 之后，否则末尾
+        insert_at = len(out_fm)
+        for i, ln in enumerate(out_fm):
+            if re.match(r"^\s*(cot_count|source_hash)\s*:", ln):
+                insert_at = i + 1
+        out_fm.insert(insert_at, f"tags: [{', '.join(union)}]")
+    new_fm = "\n".join(out_fm)
+
+    # 2) 正文每条链插入 **主题** 行
+    blocks = re.split(r"(?m)(?=^## CoT \d+ — )", body)
+    new_blocks, ci = [], 0
+    for blk in blocks:
+        if not blk.lstrip().startswith("## CoT"):
+            # preamble：同步文档级「**主题 tags**:」装饰行（loader 不读，但避免与 frontmatter 不一致）
+            if re.search(r"(?m)^\*\*主题 tags\*\*:", blk):
+                if union:
+                    repl = "**主题 tags**: " + " · ".join(f"#{t}" for t in union)
+                    blk = re.sub(r"(?m)^\*\*主题 tags\*\*:.*$", repl, blk)
+                else:
+                    blk = re.sub(r"(?m)^\*\*主题 tags\*\*:.*\n\n?", "", blk)
+            new_blocks.append(blk)
+            continue
+        tags_for = chain_tags[ci] if ci < len(chain_tags) else []
+        ci += 1
+        # 先去掉已有的 **主题** 行（重跑可覆盖）
+        blk = re.sub(r"(?m)^\*\*主题\*\*:[^\n]*\n", "", blk)
+        if tags_for:
+            m = re.match(r"(?s)(^## CoT \d+ — [^\n]*\n)", blk)
+            if m:
+                blk = m.group(1) + f"\n**主题**: {'、'.join(tags_for)}\n" + blk[m.end(1):]
+        new_blocks.append(blk)
+    new_body = "".join(new_blocks)
+
+    return pre + "---" + new_fm + "---" + new_body
+
+
+def retag_file_chains(fp: Path, dry_run: bool = False) -> dict:
+    """对单个 CoT 文件做链级主题回填：调 classify_chains 给每条链打 tag 并写回。
+
+    防丢保护：LLM 归类全空且文件原有 tag 非空 → 跳过不改（疑似 LLM 失败）。
+    返回报告 dict（dry_run 时不写盘）。
+    """
+    from ..sectors import classify_chains
+    try:
+        text = fp.read_text(encoding="utf-8")
+    except Exception as e:
+        return {"file": fp.name, "skipped": f"读取失败: {e}"}
+    fm = _parse_frontmatter(text)
+    cots = _parse_cot_body(text.split("---", 2)[-1])
+    if not cots:
+        return {"file": fp.name, "skipped": "无可解析 CoT"}
+
+    ch = classify_chains(
+        cots,
+        doc_context=f"{fm.get('source', fp.name)} / {fm.get('sector', '')}",
+        user_comment=fm.get("user_comment", ""),
+    )
+    chain_tags = ch["chain_tags"]
+    union, _seen = [], set()
+    for tg in chain_tags:
+        for t in tg:
+            if t not in _seen:
+                _seen.add(t)
+                union.append(t)
+    old_tags = _parse_tags(fm.get("tags", ""))
+
+    report = {"file": fp.name, "n_chains": len(cots), "chain_tags": chain_tags,
+              "union": union, "old_tags": old_tags, "suggested": ch.get("suggested_tags", [])}
+
+    if not union and old_tags:
+        report["skipped"] = "链级归类全空（疑似 LLM 失败），保留原状"
+        return report
+    if dry_run:
+        return report
+
+    new_text = _rewrite_with_chain_tags(text, chain_tags, union)
+    fp.write_text(new_text, encoding="utf-8")
+    report["written"] = True
+    return report
+
+
+def retag_all_chains(dry_run: bool = False) -> dict:
+    """全库链级 tag 回填。真跑前把所有目标文件备份到 _archive_retag_bak_YYYYMMDD/。
+
+    备份目录以 _archive 开头 → loader 自动跳过，不污染召回。
+    """
+    import shutil
+    files = list_cot_files()
+    if not files:
+        return {"files": [], "note": "CoT 库为空"}
+
+    backup_root = None
+    if not dry_run:
+        today = date.today().strftime("%Y%m%d")
+        backup_root = COT_DIR / f"_archive_retag_bak_{today}"
+        for fp in files:
+            rel = fp.relative_to(COT_DIR)
+            dst = backup_root / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(fp, dst)
+
+    reports = []
+    for fp in files:
+        reports.append(retag_file_chains(fp, dry_run=dry_run))
+    return {"files": reports, "backup": str(backup_root) if backup_root else None,
+            "dry_run": dry_run}
+
+
 def soft_delete_file(query: str) -> dict:
     """软删除 CoT 文件：移到所在 sector 的 _archive/，加 deleted-YYYYMMDD- 前缀。
 

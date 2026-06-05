@@ -273,6 +273,23 @@ def _do_ingest_doc(args: dict, state: dict) -> str:
         print(f"           ★ 研报质量: {'⭐' * quality_rating} ({quality_rating}/5) {quality_reason}")
     print(f"           ✓ 提炼 {len(cots)} 条")
 
+    # 链级主题归类：每条 CoT 单独打 tag（闭合词表）；frontmatter tags = 各链并集
+    print(f"           链级主题归类（{len(cots)} 条）...")
+    from ..sectors import classify_chains
+    ch = classify_chains(cots, doc_context=f"{doc['filename']} / {sector_id or ''}",
+                         user_comment=comment)
+    _union, _seen = [], set()
+    for c, tg in zip(cots, ch["chain_tags"]):
+        c["tags"] = tg
+        for t in tg:
+            if t not in _seen:
+                _seen.add(t)
+                _union.append(t)
+    if _union:
+        tags = _union
+    if ch.get("suggested_tags"):
+        print(f"           ⚠ 链级疑似新主题未归类: {ch['suggested_tags']} — 未自动建 tag")
+
     # ── [4/6] 判断是否个股深度研究 + 抽 12 维度 note ──
     print(f"     [4/6] 判断是否个股深度研究...")
     from ..note_extractor import is_individual_research, extract_12d

@@ -183,6 +183,9 @@ def main():
     pcot_raw.add_argument("query", help="cot_id 前缀 / source 文件名片段 / sector 名")
     pcot_raw.add_argument("--open", action="store_true", help="找到后用系统默认程序打开原文")
 
+    pcot_rt = cotsub.add_parser("retag-chains", help="存量回填：给每条 CoT 补链级主题 tag（闭合词表）")
+    pcot_rt.add_argument("--dry-run", action="store_true", help="只预览每条链将打的 tag，不写盘")
+
     # vet - 逻辑校验器（合成层：用 CoT+note 审一只股/一个想法）
     pvet = sub.add_parser("vet", help="逻辑校验器：输入个股(+可选想法)，用已有 CoT+note 打分/补充/写反逻辑")
     pvet.add_argument("ticker", help="标的代码，如 2513.HK")
@@ -702,6 +705,24 @@ def _ingest_one(fpath, ticker, sector, with_cot=True, force=False, user_comment=
         if quality_rating > 0:
             print(f"  ★ 研报质量: {'⭐' * quality_rating} ({quality_rating}/5) {quality_reason}")
         if cot_count_out > 0:
+            # 链级主题归类：给每条 CoT 单独打 tag（闭合词表）；frontmatter tags = 各链并集
+            from .sectors import classify_chains
+            print(f"  [LLM] 链级主题归类（{cot_count_out} 条）...")
+            ch = classify_chains(
+                cots, doc_context=f"{doc['filename']} / {final_sector or ''}",
+                user_comment=user_comment,
+            )
+            union, _seen = [], set()
+            for c, tg in zip(cots, ch["chain_tags"]):
+                c["tags"] = tg
+                for t in tg:
+                    if t not in _seen:
+                        _seen.add(t)
+                        union.append(t)
+            if union:
+                auto_tags = union  # 用链级并集作为 frontmatter tags
+            if ch.get("suggested_tags"):
+                print(f"  ⚠ 链级疑似新主题未归类: {ch['suggested_tags']} — 未自动建 tag")
             cot_path = save_cot_file(
                 cots, ticker, final_sector, doc["filename"], doc["hash"],
                 user_comment=user_comment, tags=auto_tags,
@@ -1060,6 +1081,10 @@ def _cmd_cot(args):
         _cmd_cot_raw(args.query, open_file=getattr(args, "open", False))
         return
 
+    if args.cot_cmd == "retag-chains":
+        _cmd_cot_retag(dry_run=getattr(args, "dry_run", False))
+        return
+
     if args.cot_cmd == "score":
         ticker = args.ticker.upper()
         print(f"[COT-SCORE] {ticker}")
@@ -1199,47 +1224,128 @@ def _cmd_cot_edit(query: str):
 
 
 def _cmd_cot_raw(query: str, open_file: bool = False):
-    """按 CoT 回溯归档的原始研报文件（memory/raw/<hash>_<原名>）。"""
+    """按 CoT 回溯归档的原始研报文件（memory/raw/<hash>_<原名>）。
+
+    合并文件（frontmatter 有 source_hashes）会逐个列出所有源报告，修"合并后追溯断"。
+    """
     from pathlib import Path as _P
     from .cot.local_ops import find_cot_file, load_file_cots
+    from .cot.loader import _parse_tags
+
+    raw_dir = _P(__file__).resolve().parent.parent / "memory" / "raw"
+
+    def _resolve_raw(h: str):
+        """单个 source_hash → 归档原文 Path（先查 raw/，再退台账 raw_path）。"""
+        h = (h or "").lower()
+        if not h:
+            return None
+        if raw_dir.exists():
+            ms = sorted(raw_dir.glob(f"{h}*"))
+            if ms:
+                return ms[0]
+        rec = [r for r in store.list_ingested(limit=10000) if (r.get("file_hash") or "").lower() == h]
+        if rec and rec[0].get("raw_path"):
+            cand = _P(__file__).resolve().parent.parent / "memory" / rec[0]["raw_path"]
+            if cand.exists():
+                return cand
+        return None
+
+    def _open(p):
+        import subprocess, sys
+        opener = "open" if sys.platform == "darwin" else ("start" if sys.platform.startswith("win") else "xdg-open")
+        try:
+            subprocess.run([opener, str(p)] if opener != "start" else ["cmd", "/c", "start", "", str(p)])
+        except Exception as e:
+            print(f"[COT-RAW] 打开失败: {e}")
 
     fp = find_cot_file(query)
     if not fp:
         print(f"[COT-RAW] 没找到匹配 '{query}' 的 CoT 文件")
         return
-    fm, _ = load_file_cots(fp)
-    src_hash = (fm.get("source_hash") or "").lower()
+    fm, cots = load_file_cots(fp)
     source = fm.get("source", "")
-    raw_dir = _P(__file__).resolve().parent.parent / "memory" / "raw"
 
-    matches = []
-    if src_hash and raw_dir.exists():
-        matches = sorted(raw_dir.glob(f"{src_hash}*"))
-    if not matches:
-        # 退而求其次：用 ingested_docs 台账里的 raw_path / source_path
+    # 合并文件：列出所有源报告。优先读 frontmatter source_hashes；
+    # 旧 merged 文件没有该字段时，从正文每条链的 _source_ids 推算（<hash>_<n> 取 hash 段）。
+    src_hashes = _parse_tags(fm.get("source_hashes", ""))
+    if not src_hashes:
+        _seen = set()
+        for c in cots:
+            for sid in c.get("_source_ids", []):
+                h = str(sid).rsplit("_", 1)[0]
+                if h and not h.startswith("merged") and h not in _seen:
+                    _seen.add(h)
+                    src_hashes.append(h)
+    if src_hashes:
+        print(f"[COT-RAW] 合并文件: {source}（含 {len(src_hashes)} 份源报告）")
+        any_found = False
+        for h in src_hashes:
+            rp = _resolve_raw(h)
+            if rp:
+                any_found = True
+                print(f"  • {rp.name}")
+                if open_file:
+                    _open(rp)
+            else:
+                print(f"  • (hash={h}) ⚠ 未找到归档原文")
+        if not any_found:
+            print("  ⚠ 所有源报告都未在 memory/raw/ 找到（可能在 raw 归档功能之前摄入，重抽即可补归档）")
+        return
+
+    # 单篇文件
+    src_hash = (fm.get("source_hash") or "").lower()
+    raw_fp = _resolve_raw(src_hash)
+    if not raw_fp:
+        print(f"[COT-RAW] CoT 命中: {source} (hash={src_hash or '?'})")
+        print(f"[COT-RAW] ⚠ 未在 memory/raw/ 找到归档原文。")
         rec = [r for r in store.list_ingested(limit=10000) if (r.get("file_hash") or "").lower() == src_hash]
-        if rec and rec[0].get("raw_path"):
-            cand = _P(__file__).resolve().parent.parent / "memory" / rec[0]["raw_path"]
-            if cand.exists():
-                matches = [cand]
-        if not matches:
-            print(f"[COT-RAW] CoT 命中: {source} (hash={src_hash or '?'})")
-            print(f"[COT-RAW] ⚠ 未在 memory/raw/ 找到归档原文。")
-            if rec and rec[0].get("source_path"):
-                print(f"          台账记录的原始路径: {rec[0]['source_path']}")
-            print(f"          （该研报可能在加 raw 归档功能之前摄入，重新 ingest 即可补归档）")
-            return
+        if rec and rec[0].get("source_path"):
+            print(f"          台账记录的原始路径: {rec[0]['source_path']}")
+        print(f"          （该研报可能在加 raw 归档功能之前摄入，重新 ingest 即可补归档）")
+        return
 
-    raw_fp = matches[0]
     print(f"[COT-RAW] CoT: {source}")
     print(f"[COT-RAW] 原文归档: {raw_fp}")
     if open_file:
-        import subprocess, sys
-        opener = "open" if sys.platform == "darwin" else ("start" if sys.platform.startswith("win") else "xdg-open")
-        try:
-            subprocess.run([opener, str(raw_fp)] if opener != "start" else ["cmd", "/c", "start", "", str(raw_fp)])
-        except Exception as e:
-            print(f"[COT-RAW] 打开失败: {e}")
+        _open(raw_fp)
+
+
+def _cmd_cot_retag(dry_run: bool = False):
+    """存量回填：给每条 CoT 补链级主题 tag。dry-run 预览；真跑前自动备份。"""
+    from .cot.local_ops import retag_all_chains
+
+    mode = "预览（不写盘）" if dry_run else "真跑（先备份再写）"
+    print(f"[COT-RETAG] 全库链级主题回填 — {mode}")
+    res = retag_all_chains(dry_run=dry_run)
+    files = res.get("files", [])
+    if not files:
+        print(f"  {res.get('note', '无文件')}")
+        return
+
+    changed = skipped = 0
+    for r in files:
+        if r.get("skipped"):
+            skipped += 1
+            print(f"  ⊘ {r['file']}: {r['skipped']}")
+            continue
+        changed += 1
+        n = r.get("n_chains", 0)
+        # 每条链的 tag 概览（截前 6 条）
+        preview = "; ".join(
+            f"#{i+1}:{('/'.join(tg) if tg else '—')}"
+            for i, tg in enumerate(r.get("chain_tags", [])[:6])
+        )
+        more = "" if n <= 6 else f" …(+{n-6})"
+        tag_word = "将打" if dry_run else "已打"
+        print(f"  {'·' if dry_run else '✓'} {r['file']} ({n} 链) {tag_word}: {preview}{more}")
+        print(f"      并集 frontmatter tags = {r.get('union') or '(空)'}")
+        if r.get("suggested"):
+            print(f"      ⚠ 疑似新主题(未采纳): {r['suggested']}")
+    print(f"\n[COT-RETAG] {'预计处理' if dry_run else '完成'}: 改 {changed} 文件 / 跳过 {skipped}")
+    if res.get("backup"):
+        print(f"  备份已存: {res['backup']}（loader 自动跳过，可回滚）")
+    if dry_run:
+        print(f"  确认无误后去掉 --dry-run 真跑：fa cot retag-chains")
 
 
 def _cmd_cot_regroup(query: str, dry_run: bool = False):
