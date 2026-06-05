@@ -249,6 +249,141 @@ def retag_all_chains(dry_run: bool = False) -> dict:
             "dry_run": dry_run}
 
 
+def _chain_brief(block: str) -> dict:
+    """从单个 CoT 块文本抽 trigger/signal/主题/COT 片段，用于改前回显。"""
+    cots = _parse_cot_body(block)
+    if not cots:
+        return {}
+    c = cots[0]
+    return {"trigger": c.get("trigger", ""), "signal": c.get("signal", ""),
+            "tags": c.get("_chain_tags", []), "cot": (c.get("COT", "") or "")[:120]}
+
+
+def edit_chain(cot_id: str, set_tags=None, set_signal=None,
+               set_trigger: Optional[str] = None, set_cot: Optional[str] = None,
+               delete: bool = False) -> dict:
+    """链级纠错：按 cot_id 改/删单条 CoT 链。改前回显，delete 回显被删全文（可恢复）。
+
+    - cot_id 形如 <source_hash>_<n>，n 与 load_cots 的链序号一致。
+    - set_tags：主题（list[str]），过闭合词表 _valid_theme_tag，越界报错不写。
+    - set_signal：1-10。set_trigger / set_cot：改标题 / 推理链文字。
+    - delete：删整块、其后链号前移、cot_count-1（删到 0 条则拒绝，改用 delete_cot）。
+    - 任一结构性变更后重算 frontmatter tags 并集 + 主题展示行 + cot_count。
+    """
+    from ..sectors import _valid_theme_tag
+
+    fp = find_cot_file(cot_id)
+    if not fp:
+        return {"error": f"找不到匹配 '{cot_id}' 的 CoT 文件"}
+    m_n = re.search(r"_(\d+)$", cot_id)
+    if not m_n:
+        return {"error": f"cot_id '{cot_id}' 缺少链序号后缀 _N（用 list_cot/search_memory 给的完整 id）"}
+    n = int(m_n.group(1))
+
+    text = fp.read_text(encoding="utf-8")
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {"error": "文件格式异常（无 frontmatter）"}
+    pre, fm_str, body = parts
+    segs = re.split(r"(?m)(?=^## CoT \d+ — )", body)
+    # segs[0]=preamble；segs[i]=第 i 条链（1-based）
+    cot_idxs = [i for i, s in enumerate(segs) if s.lstrip().startswith("## CoT")]
+    if not (1 <= n <= len(cot_idxs)):
+        return {"error": f"该文件只有 {len(cot_idxs)} 条链，没有第 {n} 条"}
+    seg_i = cot_idxs[n - 1]
+    block = segs[seg_i]
+    before = _chain_brief(block)
+
+    # 校验 tags（闭合词表守门）
+    new_tags = None
+    if set_tags is not None:
+        new_tags, bad = [], []
+        for t in set_tags:
+            canon = _valid_theme_tag(str(t))
+            if canon:
+                if canon not in new_tags:
+                    new_tags.append(canon)
+            else:
+                bad.append(str(t))
+        if bad:
+            return {"error": f"主题 {bad} 不在闭合词表里，未改。需先把它加入 memory/sectors.yaml"}
+
+    action_parts = []
+
+    if delete:
+        if len(cot_idxs) <= 1:
+            return {"error": "这是该文件唯一一条链，删它请用 delete_cot 软删整份（可恢复）"}
+        removed_block = segs[seg_i].rstrip()
+        del segs[seg_i]
+        action_parts.append("删除整条")
+    else:
+        if new_tags is not None:
+            block = re.sub(r"(?m)^\*\*主题\*\*:[^\n]*\n", "", block)
+            if new_tags:
+                mh = re.match(r"(?s)(^## CoT \d+ — [^\n]*\n)", block)
+                if mh:
+                    block = mh.group(1) + f"\n**主题**: {'、'.join(new_tags)}\n" + block[mh.end(1):]
+            action_parts.append(f"主题→{new_tags or '(清空)'}")
+        if set_signal is not None:
+            sig = max(1, min(10, int(set_signal)))
+            block = re.sub(r"(\*\*信号强度\*\*:\s*)\d+(\s*/\s*10)",
+                           lambda mm: f"{mm.group(1)}{sig}{mm.group(2)}", block, count=1)
+            action_parts.append(f"信号→{sig}")
+        if set_trigger is not None:
+            ls = block.split("\n")
+            mh = re.match(r"(## CoT \d+ — )(.*)", ls[0])
+            if mh:
+                suf = re.search(r"(\s*\(合并自 \d+ 条\))\s*$", mh.group(2))
+                ls[0] = f"{mh.group(1)}{set_trigger}{suf.group(1) if suf else ''}"
+                block = "\n".join(ls)
+            action_parts.append("改 trigger")
+        if set_cot is not None:
+            block = re.sub(
+                r"(\*\*推理链\*\*:\s*).+?(?=\n\*\*原文依据\*\*|\n_来源 CoT id|\n## |\Z)",
+                lambda mm: mm.group(1) + set_cot, block, count=1, flags=re.DOTALL)
+            action_parts.append("改推理链")
+        if not action_parts:
+            return {"error": "没指定要改什么（set_tags/set_signal/set_trigger/set_cot/delete 至少给一个）"}
+        segs[seg_i] = block
+
+    # 删除后重排链号 ## CoT K —
+    if delete:
+        k = 0
+        for i, s in enumerate(segs):
+            if s.lstrip().startswith("## CoT"):
+                k += 1
+                segs[i] = re.sub(r"^## CoT \d+ — ", f"## CoT {k} — ", s, count=1)
+
+    new_body = "".join(segs)
+    new_text = pre + "---" + fm_str + "---" + new_body
+
+    # 重算 frontmatter tags 并集 + cot_count + 主题展示行
+    remaining = _parse_cot_body(new_body)
+    union, _seen = [], set()
+    for c in remaining:
+        for t in (c.get("_chain_tags") or []):
+            if t and t not in _seen:
+                _seen.add(t)
+                union.append(t)
+    new_text = _rewrite_with_chain_tags(new_text, [c.get("_chain_tags") or [] for c in remaining], union)
+    new_text = re.sub(r"(?m)^cot_count:\s*\d+", f"cot_count: {len(remaining)}", new_text, count=1)
+
+    fp.write_text(new_text, encoding="utf-8")
+
+    report = {"file": fp.name, "cot_id": cot_id, "n": n,
+              "action": " / ".join(action_parts), "before": before}
+    if delete:
+        report["removed_block"] = removed_block
+        report["remaining"] = len(remaining)
+    else:
+        # after 快照
+        new_segs = re.split(r"(?m)(?=^## CoT \d+ — )", new_body)
+        new_cot_idxs = [i for i, s in enumerate(new_segs) if s.lstrip().startswith("## CoT")]
+        report["after"] = _chain_brief(new_segs[new_cot_idxs[n - 1]]) if n - 1 < len(new_cot_idxs) else {}
+    report["union"] = union
+    return report
+
+
 def soft_delete_file(query: str) -> dict:
     """软删除 CoT 文件：移到所在 sector 的 _archive/，加 deleted-YYYYMMDD- 前缀。
 

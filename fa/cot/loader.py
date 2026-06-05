@@ -146,7 +146,12 @@ def load_cots(sector: Optional[str] = None, ticker: Optional[str] = None,
     """
     files = list_cot_files(sector)
     all_cots = []
-    target_tag = (tag or "").strip().lower()
+    # 去空格匹配：'AI大模型与云' 与 'AI 大模型与云' 视为同一 tag（拼写空格不敏感）
+    target_tag = (tag or "").strip().lower().replace(" ", "")
+
+    def _tag_hit(eff_tags) -> bool:
+        return any(target_tag in t.lower().replace(" ", "") for t in eff_tags)
+
     for fp in files:
         try:
             text = fp.read_text(encoding="utf-8")
@@ -157,7 +162,7 @@ def load_cots(sector: Optional[str] = None, ticker: Optional[str] = None,
             continue
         file_tags = _parse_tags(fm.get("tags", ""))
         # 文件级预过滤（frontmatter tags 是各链 tag 的并集，是有效快路径）
-        if target_tag and not any(target_tag in t.lower() for t in file_tags):
+        if target_tag and not _tag_hit(file_tags):
             continue
         body = text.split("---", 2)[-1]
         cots = _parse_cot_body(body)
@@ -173,7 +178,7 @@ def load_cots(sector: Optional[str] = None, ticker: Optional[str] = None,
             # 有效 tag：链级标注的文件以链为准，旧文件回退文件级
             eff_tags = (c.get("_chain_tags") or []) if file_chain_tagged else file_tags
             # 链级精过滤：讲硬件的链不会再被「AI 大模型与云」之类的文件 tag 误召回
-            if target_tag and not any(target_tag in t.lower() for t in eff_tags):
+            if target_tag and not _tag_hit(eff_tags):
                 continue
             try:
                 quality_rating = int(fm.get("quality_rating", 0))

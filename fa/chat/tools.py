@@ -484,22 +484,37 @@ def _do_deep(args: dict, state: dict) -> str:
 
 def _do_list_cot(args: dict, state: dict) -> str:
     from ..cot import load_cots
-    from ..sectors import resolve_alias, get_sector
-    sector_raw = (args.get("sector") or "").strip() or state.get("last_sector")
+    from ..sectors import resolve_alias, get_sector, resolve_theme_tag, list_themes
+
+    # tag 是跨板块主轴：给了 tag 就不掺 sector（更不继承 last_sector，避免被上次的
+    # 板块静默吞掉结果——这是查询空转的主因）。只有显式传 sector 才按板块过滤。
+    tag_in = (args.get("tag") or "").strip()
+    sector_raw = (args.get("sector") or "").strip()
     sector = None
-    tag_from_sector = None
-    if sector_raw:
+    tag = None
+
+    if tag_in:
+        canon, cands = resolve_theme_tag(tag_in)
+        if canon:
+            tag = canon
+        else:
+            # 解析不到 → 不空转，直接把现有主题candidates 告诉调用方去改
+            themes = "、".join(cands[:12])
+            return (f"没有主题精确匹配 '{tag_in}'。"
+                    + (f"你是不是要找：{themes}" if cands else "")
+                    + "\n（用其中一个规范名重查；模糊词如 'AI大模型' 也行）")
+    elif sector_raw:
         resolved = resolve_alias(sector_raw)
         if resolved:
             info = get_sector(resolved)
             if info and info.get("parent") == "Theme":
-                # 用户给的"板块"其实是个主题 → 转成 tag 查询
-                tag_from_sector = info["name_cn"]
+                tag = info["name_cn"]  # 用户给的"板块"其实是主题
             else:
                 sector = resolved
+                state["last_sector"] = sector
         else:
-            sector = sector_raw  # 解析不到也允许直接用（兼容历史目录）
-    tag = (args.get("tag") or "").strip() or tag_from_sector or None
+            sector = sector_raw  # 兼容历史目录
+
     min_signal = int(args.get("min_signal") or 0)
     keyword = (args.get("keyword") or "").strip().lower()
     cots = load_cots(sector=sector, min_signal=min_signal, tag=tag)
@@ -507,30 +522,35 @@ def _do_list_cot(args: dict, state: dict) -> str:
         cots = [c for c in cots
                 if keyword in f"{c.get('trigger','')} {c.get('COT','')}".lower()]
     if not cots:
-        return f"无 CoT (sector={sector}, tag={tag}, min_signal={min_signal}, keyword={keyword or '无'})"
+        scope = tag or sector or "全库"
+        return (f"无 CoT (范围={scope}, min_signal={min_signal}, keyword={keyword or '无'})。"
+                "可降低 min_signal 或换主题。")
+
     full = bool(args.get("full"))
-    # full=true 时直接给完整推理链（含子分），省去逐条再 get_cot 的来回；
-    # 标题模式 cap 15，全文模式 cap 8（避免一次刷屏）。
+    # 排序：默认按 signal 降序；sort=asc 升序（"看分数最低的"一步到位）
+    asc = (args.get("sort") or "desc").lower() == "asc"
+    cots.sort(key=lambda c: int(c.get("signal", 0) or 0), reverse=not asc)
     cap = 8 if full else 15
-    cots.sort(key=lambda c: -int(c.get("signal", 0) or 0))
-    lines = [f"=== CoT 列表 ({len(cots)} 条{('，完整推理' if full else '')}) ==="]
+    order_hint = "分数低→高" if asc else "分数高→低"
+    lines = [f"=== CoT 列表 ({len(cots)} 条，{order_hint}{('，完整推理' if full else '')}) ==="]
     for c in cots[:cap]:
         tags = c.get("_tags") or []
         theme = "、".join(tags) if tags else "(未打主题)"
+        cid = c.get("_cot_id", "?")
         if full:
             sub = ""
             if all(k in c for k in ("transmission", "history", "recency")):
                 sub = f"  (传导{c['transmission']}·历史{c['history']}·时效{c['recency']})"
             lines.append(f"\n[{c['signal']}/10] {c['trigger']}{sub}")
-            lines.append(f"  主题={theme} · 行业={c['_sector']} · 来源={c.get('_source','?')} · id={c.get('_cot_id','?')}")
+            lines.append(f"  主题={theme} · 行业={c['_sector']} · 来源={c.get('_source','?')} · id={cid}")
             lines.append(f"  {c.get('COT','').strip()}")
         else:
             lines.append(f"  [{c['signal']}/10] {c['trigger']}")
-            lines.append(f"    主题={theme}  ·  行业={c['_sector']}")
+            lines.append(f"    主题={theme}  ·  id={cid}")
     if len(cots) > cap:
-        lines.append(f"\n... 还有 {len(cots) - cap} 条（缩小 tag/提高 min_signal 或分批看）")
-    if sector:
-        state["last_sector"] = sector
+        lines.append(f"\n... 还有 {len(cots) - cap} 条（提高 min_signal / 加 keyword / 翻看，"
+                     f"或加 full=true 看完整推理）")
+    lines.append("（要改/删某条：用它的 id 调 edit_cot_chain）")
     return "\n".join(lines)
 
 
@@ -645,9 +665,10 @@ TOOLS_SPEC = [
     },
     {
         "name": "list_cot",
-        "description": ("列出已提炼的思维链 CoT。可按主板块 (sector) 或主题 (tag) 过滤；tag 是跨板块召回的关键能力。"
-                        "**用户要看某筛选集（如某主题 + 高分）的完整推理链时，直接传 full=true，一次返回全文，"
-                        "不要再逐条 get_cot。** 默认按 signal 倒序。"),
+        "description": ("列出已提炼的思维链 CoT。按主题 (tag) 或主板块 (sector) 过滤；tag 是跨板块召回主轴。"
+                        "**tag 用模糊词即可**（'AI大模型'/'大模型' 自动解析到 'AI 大模型与云'，空格/拼写不敏感），"
+                        "不用先查全称、不用反复试。看某主题完整推理传 full=true（一次返回全文，别逐条 get_cot）；"
+                        "看分数最低的传 sort=asc。每条带 id，可据此 edit_cot_chain 改/删。"),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -655,6 +676,7 @@ TOOLS_SPEC = [
                 "tag": {"type": "string", "description": "主题 tag，跨板块召回。例：'AI 主题' / '燃气轮机'"},
                 "min_signal": {"type": "integer", "description": "信号强度下限 1-10"},
                 "keyword": {"type": "string", "description": "在 trigger+正文里再做关键词过滤（可选）"},
+                "sort": {"type": "string", "enum": ["desc", "asc"], "description": "按 signal 排序，desc=高到低(默认)，asc=低到高（看最低分用 asc）"},
                 "full": {"type": "boolean", "description": "true 则输出每条的完整推理链 + 子分（最多 8 条），否则只列标题（最多 15 条）"}
             },
             "required": []
@@ -791,6 +813,25 @@ TOOLS_SPEC = [
                 "date": {"type": "string", "description": "YYYY-MM-DD，可空；只删指定日期那条"},
             },
             "required": [],
+        },
+    },
+    {
+        "name": "edit_cot_chain",
+        "description": ("链级纠错：按 cot_id 改/删**单条** CoT 链（其余链不动）。用户要纠正某条的"
+                        "主题/信号分/标题/推理链，或删掉某条没价值/重复的链时用。cot_id 从 list_cot/"
+                        "search_memory 输出的 `id=` 取。set_tags 必须是闭合词表主题（越界会被拒）。"
+                        "delete=true 只删这一条且回显被删全文可恢复。改前用一句话说清改的是哪条、改成什么。"),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "cot_id": {"type": "string", "description": "目标链 id，形如 <hash>_<n>（来自 list_cot/search_memory）"},
+                "set_tags": {"type": "array", "items": {"type": "string"}, "description": "新主题（闭合词表 name_cn），覆盖该链主题；传 [] 清空"},
+                "set_signal": {"type": "integer", "description": "新信号分 1-10"},
+                "set_trigger": {"type": "string", "description": "新 trigger 标题文字"},
+                "set_cot": {"type": "string", "description": "新推理链正文"},
+                "delete": {"type": "boolean", "description": "true=删除这条链（可恢复，回显被删内容）"},
+            },
+            "required": ["cot_id"],
         },
     },
 ]
@@ -1024,6 +1065,37 @@ def _do_delete_note(args: dict, state: dict) -> str:
     return (f"✓ 已软删除（归档，可恢复）{res['ticker']} 的 {len(res['archived'])} 条笔记 → theses/user/_archive/")
 
 
+def _do_edit_cot_chain(args: dict, state: dict) -> str:
+    """链级纠错：按 cot_id 改/删单条 CoT 链。"""
+    from ..cot.local_ops import edit_chain
+    cot_id = (args.get("cot_id") or "").strip()
+    if not cot_id:
+        return "错误：缺少 cot_id（从 list_cot/search_memory 的 id= 取）"
+    res = edit_chain(
+        cot_id,
+        set_tags=args.get("set_tags"),
+        set_signal=args.get("set_signal"),
+        set_trigger=args.get("set_trigger"),
+        set_cot=args.get("set_cot"),
+        delete=bool(args.get("delete")),
+    )
+    if res.get("error"):
+        return f"✗ {res['error']}"
+    b = res.get("before", {})
+    lines = [f"✓ [{res['cot_id']}] {b.get('trigger', '')[:40]}",
+             f"  操作: {res['action']}"]
+    if res.get("removed_block") is not None:
+        lines.append(f"  剩余 {res['remaining']} 条。被删内容（在此可恢复）：")
+        lines.append("  " + res["removed_block"].replace("\n", "\n  ")[:600])
+    else:
+        a = res.get("after", {})
+        if a:
+            lines.append(f"  改前: 信号{b.get('signal', '?')}/10 · 主题={b.get('tags') or '(无)'}")
+            lines.append(f"  改后: 信号{a.get('signal', '?')}/10 · 主题={a.get('tags') or '(无)'}")
+    lines.append(f"  文件主题并集 = {res.get('union') or '(空)'}")
+    return "\n".join(lines)
+
+
 HANDLERS: dict[str, Callable[[dict, dict], str]] = {
     "find_ticker": _do_find_ticker,
     "add_note": _do_add_note,
@@ -1044,6 +1116,7 @@ HANDLERS: dict[str, Callable[[dict, dict], str]] = {
     "rescore_cot": _do_rescore_cot,
     "delete_cot": _do_delete_cot,
     "delete_note": _do_delete_note,
+    "edit_cot_chain": _do_edit_cot_chain,
 }
 
 

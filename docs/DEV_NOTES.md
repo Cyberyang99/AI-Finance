@@ -196,6 +196,20 @@ DeepSeek v4 思考模式下，assistant content 含 `thinking` block。多轮 to
 
 > 「AI 教育」纪要的处置（2026-06-05）：内容确是 AI+教育，但**用户决定不把「AI 教育」加进闭合词表**（保持词表精简），故清空其错误的 `AI 大模型与云` 文件级 tag，留空——这份不被任何主题召回，仅靠 sector/关键词可达。体现闭合词表"由用户策展"原则：要不要新主题是人的决定。
 
+## 五点八、CoT 查询体验修复 + 链级纠错（2026-06-05）
+
+用户高频查询 CoT，体验差且无法方便纠错。两个查询根因 bug + 一个能力缺口。
+
+### 查询
+- **Bug：`list_cot` 静默继承 `last_sector`**（`_do_list_cot`）。只给 tag 的查询被上次留下的 sector（如 Utilities）过滤 → 空 → LLM 反复换拼写硬试 → 撞循环上限。**修**：给了 tag 就完全不碰 sector，且不再读 `state["last_sector"]` 做过滤（消除"静默状态"脆弱点）。
+- **Bug：tag 匹配空格敏感**（`load_cots` `target in t.lower()`）。`AI大模型与云`(无空格)=0、`AI 大模型与云`=82。**修**：去空格子串匹配（`_tag_hit`），所有调用方受益。
+- **新增 `sectors.resolve_theme_tag(q)`**：模糊词 → 规范 name_cn（精确→去空格双向子串→唯一命中；零/多→候选）。`_do_list_cot` 用它解析 tag，解析不到**返回"现有主题"提示**而非空转。
+- list_cot 加 `sort=asc/desc`（"看最低分"一步到位）、每行带 `id`（供纠错点名）、查询结果默认**不折叠**（`_QUIET_TOOLS` 只剩 find_ticker；查询结果就是用户要的东西）。
+
+### 链级纠错（`local_ops.edit_chain` + chat `edit_cot_chain`）
+按 `cot_id`（`<hash>_<n>`，与 `load_cots` 链序号一致）改/删**单条**链：`set_tags`（过 `_valid_theme_tag` 闭合词表守门，越界拒绝）/`set_signal`/`set_trigger`/`set_cot`/`delete`。块手术：定位第 n 个 `## CoT` 块做正则替换；**删除后重排 `## CoT K —` 链号 + 重算 frontmatter tags 并集 + `cot_count`**；delete 回显被删全文（留 chat 记录里可恢复）。chat NL：用户"把这条主题改成X/这条删掉"→ LLM 从 list/search 拿 id 调工具。
+> 坑：删链后其后链的 `_cot_id` 序号前移（位置型 id 固有）；一次改一条、改完重新 list。单条编辑不做逐次备份（块级、点名、回显即安全网）。
+
 ## 六、给未来 Claude 的建议
 
 1. **永远不要为"漂亮"重构记忆系统**。三层架构是有意的，不要合并。

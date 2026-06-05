@@ -196,6 +196,33 @@ def _valid_theme_tag(tag: str) -> Optional[str]:
     return _theme_tag_lookup().get(_norm_tag_key(tag))
 
 
+def resolve_theme_tag(query: str) -> tuple[Optional[str], list[str]]:
+    """把模糊的主题查询词解析到规范 name_cn。
+
+    返回 (canonical | None, candidates)：
+      ① 先 _valid_theme_tag 精确（name_cn/alias，去空格大小写不敏感）；
+      ② 再对 list_themes() 的 name_cn 做去空格双向子串（'AI大模型'/'大模型' → 'AI 大模型与云'）；
+      ③ 命中唯一 → (规范名, [])；多个 → (None, 候选)；零个 → (None, 全部主题名)。
+    供 list_cot/CLI 用：模糊词自动归一，套不上时给候选提示，不再静默空转。
+    """
+    if not query or not query.strip():
+        return None, [s["name_cn"] for s in list_themes()]
+    canon = _valid_theme_tag(query)
+    if canon:
+        return canon, []
+    qn = _norm_tag_key(query)
+    hits = []
+    for s in list_themes():
+        nn = _norm_tag_key(s["name_cn"])
+        if qn and (qn in nn or nn in qn):
+            hits.append(s["name_cn"])
+    if len(hits) == 1:
+        return hits[0], []
+    if hits:
+        return None, hits
+    return None, [s["name_cn"] for s in list_themes()]
+
+
 def _parse_json(text: str) -> Optional[dict]:
     if not text:
         return None
