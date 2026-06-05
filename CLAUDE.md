@@ -71,6 +71,8 @@ memory/                   # 持久化数据（git 管理，可读、可追溯）
 - 文件名小写，连字符分隔（`red-flags.md` 不是 `red_flags.md`）
 - ticker 用大写 + 交易所后缀：`2513.HK` / `300750.SHE` / `AAPL.US`。**港股去前导 0**（`3888.HK` 不是 `03888.HK`）、A 股 6 位补零。统一走 `resolver._normalize_ticker`；note 文件名、frontmatter `ticker:`、正文标题三处必须一致
 - 主题 tag：前导 ASCII 词与中文之间留**单空格**（`AI 算力` / `AI 大模型与云`，不是 `AI算力`）。tag 是 CoT 召回主轴，拼写不一致会把同一主题拆开、拖累召回
+- **主题 tag 是链级的（v4 起）**：每条 CoT 落盘带一行 `**主题**: a、b`，召回按链过滤（loader `_chain_tags`）；frontmatter `tags:` = 各链 tag 的并集（快路径用）。旧文件无 `**主题**` 行则回退文件级，平滑兼容。新摄入由 `sectors.classify_chains` 逐链打 tag；存量补标用 `fa cot retag-chains`
+- **主题词表闭合、由用户策展**：classify 只能从 `memory/sectors.yaml` 的 Theme 选，套不上就留空 + 报 `suggested_tags`，**是否新增主题是人的决定**（手动改 yaml），绝不让 LLM 现编
 - 日期一律 `YYYY-MM-DD`
 - Frontmatter 字段固定：`ticker / sector / source / created_at / confidence / sector_scope / sector_excluded`
 
@@ -100,6 +102,7 @@ fa deep 2513.HK                 # 端到端冒烟（DeepSeek 真实调用）
 | **P2** | CoT 联合投票选股 + deep 模式 CoT 辅助证据 | ✅ |
 | **Tier 1** | CoT 合并迭代 + note 自动结构化 + import 通用入口 | ✅ |
 | **Tier 1.5** | CoT 质量自适应数量 + 显化打分子分 + dash 全库统计 + regroup/edit/rescore + docx 文本框抽取 | ✅ |
+| **Tier 1.7** | 链级主题 tag（classify_chains + retag-chains 回填）+ 合并可追溯（source_hashes）+ chat 查询修死循环/降噪 + 上传意图询问 | ✅ |
 | Tier 2 | **fa chat 体验升级（rich UI + 上下文裁剪/会话持久化 + search/get 召回 + 软删除/合并）✅** ; Web UI / 微信 bot / 多 workspace ⏳ | 🔵 进行中 |
 | Tier 3 | Mem-Palace 层级 + GEPA 进化 + CoT 单链回测 + 多模态 | ⏳ |
 

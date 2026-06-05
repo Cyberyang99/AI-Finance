@@ -173,6 +173,29 @@ DeepSeek v4 思考模式下，assistant content 含 `thinking` block。多轮 to
 - 旧 repl 直接 `messages.append({"content": resp.content})`（原始 block 对象）所以没事。
 - 重构时若把 content 转 dict 落盘/裁剪，**务必保留 thinking/redacted_thinking**（用 `block.model_dump(exclude_none=True)` 最稳，见 `_blocks_to_dicts`），只留 text/tool_use 会炸。
 
+## 五点七、CoT 主题 tag 下沉到链级 + 合并可追溯 + 上传询问（2026-06-05）
+
+`fa chat` 用中暴露三个问题，根因都在 CoT 数据模型。
+
+### 1. 主题污染：tag 原本是文档级，应是链级
+**病根**：`load_cots(tag=X)` 只看文件 frontmatter 的 `tags`，命中就返回该文件**全部链**，不管单条链讲什么。一份横跨软硬件的报告被打多个 tag，它讲软件的链和讲硬件的链就共享同一组 tag。量化：227 条链里 **123 条（54%）来自挂 >1 tag 的文件**（7 个文件，其中 5 个是单篇——所以主因是 tag 粒度，合并只是放大器）。
+**改动**：tag 下沉到**链级**。
+- 每条 CoT 落盘加一行 `**主题**: a、b`（`save_cot_file` / `_write_merged_file` 都写）；frontmatter `tags` 改为**各链 tag 的并集**（作文件级快路径过滤的超集，仍有效）。
+- `loader._parse_cot_body` 解析出 `_chain_tags` + `_chain_tag_line`；`load_cots` 按链级过滤，**旧文件无 `**主题**` 行则回退文件级**（`file_chain_tagged` 标志切换）——平滑迁移，对存量行为零改变（验证 153/90/34 与改前逐字一致）。
+- 生成端：`sectors.classify_chains()`（新）给每条链单独从**闭合词表**选 0-2 主题，复用 `_valid_theme_tag` 守门（延续「AI 教育」事件原则，不让 LLM 现编）。**同一函数同时服务新摄入和回填**。
+- 回填：`fa cot retag-chains [--dry-run]`，真跑前备份到 `_archive_retag_bak_YYYYMMDD/`（loader 跳过，可回滚）。回填后 **AI 大模型与云 153→82、AI 算力 90→20**，硬件链不再被误召回。
+
+**坑：flash 对结构化输出方差大**。同一文件两次跑结果可能空/非空。对策：① 输出额度按链数放大 `min(8000, 1200+n*180)` 防截断；② 截断 JSON 用正则 `_salvage_chain_assignments` 逐条捞 `{"i":N,"tags":[...]}`；③ 重试至至少一条链有有效 tag（合法全空的文件——纯讲某公司 IPO/估值——最多试 3 次后接受空）；④ 调用方**防丢**：LLM 全空且文件原有 tag 非空 → 跳过不改。
+
+### 2. 合并不可追溯
+**病根**：merged 文件 `source_hash=merged_YYYY-MM-DD`，`fa cot raw` 回不到原始 PDF。
+**改动**：`_write_merged_file` 写 frontmatter `source_hashes: [...]`（从各链 `_source_ids` 的 `<hash>_<n>` 取 hash 去重）；`loader` 解析 `_来源 CoT id` 行（整行匹配 + 去尾部斜体下划线——**cot_id 本身含 `_`，不能用 `.+?_` 非贪婪，会截断**）；`fa cot raw` 对 merged 文件逐个列出源报告（旧 merged 无 frontmatter 字段时从正文 `_source_ids` 推算）。
+
+### 3. 上传易误操作
+`repl._handle_upload_intent`：消息含文件路径但无意图词（cot/思维链 vs 笔记/note vs both）→ 弹三选一再分派 `_do_ingest_doc`/`_do_add_note`；说了意图就直接干。符合用户"反对静默自动操作"偏好。
+
+> 「AI 教育」纪要的处置（2026-06-05）：内容确是 AI+教育，但**用户决定不把「AI 教育」加进闭合词表**（保持词表精简），故清空其错误的 `AI 大模型与云` 文件级 tag，留空——这份不被任何主题召回，仅靠 sector/关键词可达。体现闭合词表"由用户策展"原则：要不要新主题是人的决定。
+
 ## 六、给未来 Claude 的建议
 
 1. **永远不要为"漂亮"重构记忆系统**。三层架构是有意的，不要合并。
@@ -181,4 +204,6 @@ DeepSeek v4 思考模式下，assistant content 含 `thinking` block。多轮 to
 4. **永远不要绕过 ConflictResolver 直接写笔记**。会重蹈"摄入越多越乱"覆辙。
 5. **新功能优先考虑"用户的输入路径是否方便"**。这是用户的元需求。
 6. **DeepSeek 是默认 LLM，但所有 prompt 写成可移植**（不要依赖 DeepSeek 特定能力）。
+7. **主题 tag 是链级的，不是文档级**。召回按每条链的 `**主题**` 行（loader `_chain_tags`），旧文件回退文件级。改 CoT 召回/统计时别退回"文件 tags 覆盖全部链"的老模型。主题词表**闭合、由用户策展**：classify 只能从 `sectors.yaml` 选，套不上留空 + 报 `suggested_tags`，是否加新主题是人的决定——绝不让 LLM 现编（「AI 教育」事件教训）。
+8. **改动 memory/ 批处理前先备份**（memory/knowledge/cot 是 gitignore 的本地数据，无 git 兜底）。参考 `retag_all_chains` 的 `_archive_retag_bak_*` 模式，备份目录以 `_archive` 开头让 loader 自动跳过。
 7. **commit 风格**：标题用 `feat/fix/chore/refactor` 前缀，body 写"为什么"而非"做了什么"。
