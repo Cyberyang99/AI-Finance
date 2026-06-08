@@ -210,6 +210,21 @@ DeepSeek v4 思考模式下，assistant content 含 `thinking` block。多轮 to
 按 `cot_id`（`<hash>_<n>`，与 `load_cots` 链序号一致）改/删**单条**链：`set_tags`（过 `_valid_theme_tag` 闭合词表守门，越界拒绝）/`set_signal`/`set_trigger`/`set_cot`/`delete`。块手术：定位第 n 个 `## CoT` 块做正则替换；**删除后重排 `## CoT K —` 链号 + 重算 frontmatter tags 并集 + `cot_count`**；delete 回显被删全文（留 chat 记录里可恢复）。chat NL：用户"把这条主题改成X/这条删掉"→ LLM 从 list/search 拿 id 调工具。
 > 坑：删链后其后链的 `_cot_id` 序号前移（位置型 id 固有）；一次改一条、改完重新 list。单条编辑不做逐次备份（块级、点名、回显即安全网）。
 
+## 五点九、召回反馈闭环：给情境笔记记胜率（2026-06-08）
+
+**问题**：`RecallAgent` 召回情境笔记后从不复盘——哪条真帮上了判断、哪条只是反复被召回却毫无贡献，无从知晓。笔记库只进不出，慢慢积出"僵尸笔记"：白占召回名额、白烧 token、还稀释有用笔记。这是 PDF2「情境记忆熵管理」缺的那一环。
+
+**做法**（挂在已有 deep→thesis→review 闭环上，不新建流程）：
+- `theses` 表加 `recalled_note_ids TEXT`（JSON）。召回发生在**预测时**，所以 id 挂论点，不挂 review。
+- `do_deep` 跑完、论点落盘后调 `store.set_thesis_recall(ticker, ids)`；id 仅取**情境笔记**（`_recall_for_deep` 第 2 段那批），用户论点/CoT 不计入（不在 situations 库、不可同口径归档）。
+- `store.note_recall_stats()` 算账：每条笔记聚合它所在论点的预测命中（`correct/可验证总数`，排除"无法验证/无法判定"），出 `recall_count` / `hit_rate`。
+- `fa evolve` 加一段"僵尸笔记识别"：召回≥2 次但胜率<50% → 列出来提示复核/archive。
+
+**两个设计选择**：
+- **只提示、不自动删**。守红线（不动 memory），也合 [[fa-ux-fragility-preference]]（反对静默改状态）。归档仍是人调 `situations.archive`。
+- **存量 0 影响**。改动前的论点无 `recalled_note_ids`，迁移加的是 nullable 列；从下一次 `fa deep` 起才累积，跑过 deep + review 后 evolve 才出胜率表。
+> 边界：`set_thesis_recall` 空列表不写——避免重跑 deep（save_thesis 是 UPSERT）时把历史归因覆盖掉。
+
 ## 六、给未来 Claude 的建议
 
 1. **永远不要为"漂亮"重构记忆系统**。三层架构是有意的，不要合并。

@@ -50,7 +50,9 @@ class MemoryStore:
                     baseline_date TEXT,              -- 基线快照日期
                     baseline_price REAL,             -- 论点建立时股价
                     baseline_index REAL,             -- 论点建立时大盘指数
-                    baseline_index_name TEXT         -- 基准名称（沪深300/恒生/标普500）
+                    baseline_index_name TEXT,        -- 基准名称（沪深300/恒生/标普500）
+                    -- 召回反馈闭环: 这条论点预测时召回了哪些情境笔记 (JSON list of note_id)
+                    recalled_note_ids TEXT
                 );
 
                 -- 情景记忆: 回顾记录
@@ -167,6 +169,7 @@ class MemoryStore:
                 ("baseline_price", "REAL"),
                 ("baseline_index", "REAL"),
                 ("baseline_index_name", "TEXT"),
+                ("recalled_note_ids", "TEXT"),
             ]:
                 if col not in cols:
                     c.execute(f"ALTER TABLE theses ADD COLUMN {col} {ddl}")
@@ -311,6 +314,24 @@ class MemoryStore:
         with self._conn() as c:
             c.execute("UPDATE theses SET status='falsified' WHERE ticker=?", (ticker,))
 
+    def set_thesis_recall(self, ticker: str, note_ids: list) -> bool:
+        """记录某 ticker 当前活跃论点预测时召回了哪些情境笔记（召回反馈闭环）。
+
+        在 do_deep 跑完、论点已落盘后调用。空列表不写——避免重跑时把历史归因覆盖掉。
+        """
+        if not note_ids:
+            return False
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT id FROM theses WHERE ticker=? AND status='active' "
+                "ORDER BY updated_at DESC LIMIT 1", (ticker,)
+            ).fetchone()
+            if not row:
+                return False
+            c.execute("UPDATE theses SET recalled_note_ids=? WHERE id=?",
+                      (json.dumps(note_ids, ensure_ascii=False), row["id"]))
+            return True
+
     # ── 回顾操作 ──
 
     def save_review(self, ticker: str, thesis_id: int, prediction_results: list,
@@ -358,6 +379,71 @@ class MemoryStore:
             "wrong": wrong,
             "accuracy": round(correct / total * 100, 1) if total > 0 else 0
         }
+
+    def note_recall_stats(self) -> list[dict]:
+        """情境笔记的召回-命中统计（识别"僵尸笔记"）。
+
+        对每条被召回过的情境笔记，聚合它所在论点的预测验证结果：
+          recall_count    = 被多少条论点召回过
+          reviewed_theses = 其中有几条论点已有可验证的回顾
+          correct/total   = 这些论点的预测里，正确数 / 可验证数（排除"无法验证/无法判定"）
+          hit_rate        = correct/total（无可验证样本则 None）
+        僵尸 = recall_count 高但 hit_rate 低：反复被召回却从不帮上忙。
+        按 hit_rate 升序、recall_count 降序排，最该清理的在最前。
+        """
+        with self._conn() as c:
+            theses = c.execute(
+                "SELECT id, recalled_note_ids FROM theses WHERE recalled_note_ids IS NOT NULL"
+            ).fetchall()
+            review_rows = c.execute(
+                "SELECT thesis_id, prediction_results FROM reviews"
+            ).fetchall()
+
+        # 每条论点的命中: correct / verifiable_total
+        thesis_score = {}
+        for r in review_rows:
+            tid = r["thesis_id"]
+            results = json.loads(r["prediction_results"]) if r["prediction_results"] else []
+            st = thesis_score.setdefault(tid, {"correct": 0, "total": 0})
+            for p in results:
+                verdict = p.get("result", "")
+                if verdict in ("无法验证", "无法判定"):
+                    continue
+                st["total"] += 1
+                if verdict == "正确":
+                    st["correct"] += 1
+
+        # 每条笔记聚合它所在的（已回顾）论点表现
+        note_stats = {}
+        for t in theses:
+            try:
+                ids = json.loads(t["recalled_note_ids"]) if t["recalled_note_ids"] else []
+            except (json.JSONDecodeError, TypeError):
+                ids = []
+            score = thesis_score.get(t["id"])
+            for nid in ids:
+                ns = note_stats.setdefault(nid, {"recall_count": 0, "reviewed_theses": 0,
+                                                 "correct": 0, "total": 0})
+                ns["recall_count"] += 1
+                if score and score["total"] > 0:
+                    ns["reviewed_theses"] += 1
+                    ns["correct"] += score["correct"]
+                    ns["total"] += score["total"]
+
+        out = []
+        for nid, ns in note_stats.items():
+            hit = round(ns["correct"] / ns["total"] * 100, 1) if ns["total"] > 0 else None
+            out.append({
+                "note_id": nid,
+                "recall_count": ns["recall_count"],
+                "reviewed_theses": ns["reviewed_theses"],
+                "correct": ns["correct"],
+                "total": ns["total"],
+                "hit_rate": hit,
+            })
+        out.sort(key=lambda x: (x["hit_rate"] if x["hit_rate"] is not None else 1e9,
+                                -x["recall_count"]))
+        return out
 
     # ── 板块知识 ──
 

@@ -104,6 +104,7 @@ fa deep 2513.HK                 # 端到端冒烟（DeepSeek 真实调用）
 | **Tier 1.5** | CoT 质量自适应数量 + 显化打分子分 + dash 全库统计 + regroup/edit/rescore + docx 文本框抽取 | ✅ |
 | **Tier 1.7** | 链级主题 tag（classify_chains + retag-chains 回填）+ 合并可追溯（source_hashes）+ chat 查询修死循环/降噪 + 上传意图询问 | ✅ |
 | **Tier 1.8** | 查询体验：tag 模糊解析（resolve_theme_tag）+ 去空格匹配 + list_cot 排序/带 id/不再继承 sector + 链级纠错 edit_cot_chain（改主题/分/正文/删单条，闭合词表守门） | ✅ |
+| **Tier 1.9** | 召回反馈闭环：theses.recalled_note_ids 记预测时召回的情境笔记 + note_recall_stats 算每条笔记胜率 + fa evolve 列"僵尸笔记"（召回≥2 次胜率<50%，只提示不自动删） | ✅ |
 | Tier 2 | **fa chat 体验升级（rich UI + 上下文裁剪/会话持久化 + search/get 召回 + 软删除/合并）✅** ; Web UI / 微信 bot / 多 workspace ⏳ | 🔵 进行中 |
 | Tier 3 | Mem-Palace 层级 + GEPA 进化 + CoT 单链回测 + 多模态 | ⏳ |
 

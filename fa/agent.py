@@ -542,7 +542,7 @@ def do_deep(ticker: str):
     sector = data.get("sector", "")
 
     # 情境记忆召回
-    recalled_notes = _recall_for_deep(ticker, data)
+    recalled_notes, recalled_situ_ids = _recall_for_deep(ticker, data)
 
     user_msg = f"""## deep 模式
 
@@ -558,6 +558,13 @@ Ticker: {ticker}
     system = _build_system_prompt("deep", sector=sector, ticker=ticker,
                                   recalled_notes=recalled_notes)
     full_text = _run_agent(system, user_msg, f"deep: {ticker}")
+
+    # 召回反馈闭环：记下这次预测召回了哪些情境笔记，供 fa evolve 算胜率 / 识别僵尸笔记
+    if recalled_situ_ids:
+        try:
+            store.set_thesis_recall(ticker, recalled_situ_ids)
+        except Exception as e:
+            print(f"  [RECALL] 召回记录写入跳过: {e}")
 
     # ── 后置：把 agent 输出的完整分析过一遍 LLM，抽 12 维度 deep note ──
     print(f"\n\n[DEEP→12d] 抽取 12 维度 deep note...")
@@ -605,6 +612,7 @@ def _recall_for_deep(ticker: str, data: dict) -> list:
     用户输入比 agent 自己沉淀的笔记权重高（PDF2 设计：和你思考逻辑对齐）。
     """
     out = []
+    situ_note_ids = []  # 仅情境笔记的 id（用户论点/CoT 不在此列），供召回反馈闭环记账
 
     # 1. 用户论点优先（无 LLM 调用，按 ticker 直接拉）
     try:
@@ -646,6 +654,7 @@ def _recall_for_deep(ticker: str, data: dict) -> list:
             selected = recall.recall(ctx, index, top_k=5)
             if selected:
                 note_ids = [s["id"] for s in selected]
+                situ_note_ids = note_ids
                 print(f"  [RECALL] 情境笔记召回 {len(note_ids)} 条 (行业过滤后): {note_ids}")
                 full = situations.get_full_notes(note_ids)
                 out.extend(full)
@@ -680,7 +689,7 @@ def _recall_for_deep(ticker: str, data: dict) -> list:
     except Exception as e:
         print(f"  [RECALL] CoT 注入跳过: {e}")
 
-    return out
+    return out, situ_note_ids
 
 
 def _apply_reflection(candidates: list[dict], ticker: str, excess: float = None) -> dict:
@@ -947,6 +956,23 @@ def do_evolve(apply_index: int = None):
             print(f"  {p['description']}")
             if p.get("suggested_fix"):
                 print(f"  建议: {p['suggested_fix']}")
+
+    print("\n[EVOLVE] 情境笔记召回胜率（僵尸笔记识别）...")
+    note_stats = store.note_recall_stats()
+    reviewed = [n for n in note_stats if n["total"] > 0]
+    if not reviewed:
+        print("  暂无「召回笔记 × 已回顾论点」样本（需先 fa deep 召回笔记、再 fa review 验证预测）。")
+    else:
+        for n in reviewed[:8]:
+            note = situations.load(n["note_id"])
+            title = note.get("situation", "")[:40] if note else "（笔记已删除）"
+            print(f"    {n['hit_rate']:5.1f}% | 召回 {n['recall_count']:>2} 次 / 已验证 {n['reviewed_theses']} "
+                  f"| {n['note_id']}  {title}")
+        zombies = [n for n in reviewed if n["recall_count"] >= 2 and (n["hit_rate"] or 0) < 50]
+        if zombies:
+            print(f"\n  ⚠ 疑似僵尸笔记 {len(zombies)} 条（召回≥2 次但胜率<50%），建议复核或 archive：")
+            for n in zombies:
+                print(f"    - {n['note_id']} (胜率 {n['hit_rate']}%, 召回 {n['recall_count']} 次)")
 
     print("\n[EVOLVE] 框架更新建议...")
     suggestions = evolution.suggest_framework_updates()
