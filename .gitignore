@@ -40,6 +40,8 @@ memory/*.bak.*
 memory/**/*.bak.local.*
 memory/_premerge_bak_*/
 memory/_normalize_bak_*/
+memory/_archive*/
+memory/**/_archive*/
 
 # fa chat 会话历史（私有对话，本机+OneDrive，不入 git）
 memory/.chat_sessions/

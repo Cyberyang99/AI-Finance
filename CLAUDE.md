@@ -13,27 +13,46 @@
 
 ```
 fa/                       # 代码
-  agent.py                # Agent 主循环（Predictor + 工具调度）
-  cli.py                  # CLI 入口
+  agent.py                # Agent 主循环（Predictor + 工具调度，渐进式加载）
+  cli.py                  # CLI 入口（fa 各子命令注册）
   config.py               # 配置 + .env 加载（utf-8-sig 抗 BOM）
-  framework.py            # 框架文件加载（硬框架）
-  agents/                 # 子 Agent
-    critic.py             # 评审（独立 LLM，锚定客观分 ±0.2）
+  framework.py            # 硬框架加载/更新（读写 memory/framework/）
+  vet.py                  # 逻辑校验器（fa vet）：用已有 CoT+note 审视一只股票/一个想法
+  sectors.py              # 板块清单 + 同义词归一 + 链级主题分类（classify_chains）
+  note_extractor.py       # 文档/文本 → 12 维度个股投资逻辑 note
+  note_template.py        # 12 维度笔记模板
+  review_v2.py            # 基于 12 维 note frontmatter 的结构化复盘
+  agents/                 # 子 Agent（各自独立 LLM）
+    critic.py             # 评审（锚定客观分 ±0.2）
     recall.py             # 情境记忆召回（LLM 全量判断）
-    reflector.py          # [P1 待建] 失败诊断
+    reflector.py          # 重大失败/成功的根因诊断 → 候选情境笔记
+    conflict.py           # ConflictResolver：候选笔记 vs 笔记池（add/skip/replace/branch）
   memory/                 # 记忆引擎
-    store.py              # SQLite 持久化
+    store.py              # SQLite 持久化（三层记忆底座）
     situations.py         # 情境笔记（Frontmatter + md）
-    predictions.py        # 预测注册 + 验证
+    predictions.py        # 预测注册 + 验证（进化闭环核心）
     performance.py        # 客观分（vs 大盘超额）
     evolution.py          # 进化引擎（规则统计；P3 升级为 GEPA）
+  cot/                    # CoT 思维链子系统
+    loader.py             # 加载（链级主题 tag；跳过 _archive）
+    scorer.py             # 单链对单股符合度（4 维：传导/证伪/历史/时效）
+    voter.py              # 多专家联合投票/加权选股
+    merger.py             # 跨文档合并迭代（治"摄入越多越乱"）
+    stats.py              # 全库统计（fa cot dash 后端）
+    local_ops.py          # 不重抽 LLM 的本地重组/重打分/链级编辑
   tools/                  # 工具调用
-    data.py               # EODHD + akshare 行情/财务
-    sector.py             # 板块成分股
-  ingest/                 # [P0 在建] 外部文档摄入
-    loaders/              # pdf/docx/xlsx/pptx 四 loader
-    cot_extractor.py      # 研报 → CoT 三段式
-    user_note.py          # 用户论点结构化录入
+    data.py               # EODHD + akshare 行情/财务 + 缓存
+    sector.py             # 板块成分股发现
+  ingest/                 # 外部文档摄入
+    base.py               # 摄入入口（按扩展名分发 + archive_raw 原文归档）
+    runner.py             # 通用导入分流（CoT vs user note）
+    cot_extractor.py      # 研报文本 → CoT 三段式（trigger/COT/signal）
+    user_note.py          # 用户论点 4 维度结构化录入
+    loaders/              # pdf/docx/pptx/xlsx/text 五 loader
+  chat/                   # fa chat 交互（Tier 2）
+    repl.py               # REPL 主循环（rich UI + 会话持久化）
+    tools.py              # 把 fa 命令包装成 tool use（search/get/list/merge…）
+    resolver.py           # ticker 模糊解析 + 主题 tag 归一（resolve_theme_tag）
 
 docs/                     # 项目文档
   ROADMAP.md              # 路线图（Tier 1/2/3 + 不做清单）
@@ -45,13 +64,14 @@ memory/                   # 持久化数据（git 管理，可读、可追溯）
     checklist.md          # 商业模式检查清单
     red-flags.md          # 风险信号库
     valuation.md          # 估值方法论
+  sectors.yaml            # 板块/主题闭合词表（classify 只能从这里选；新增主题人工改）
   knowledge/              # L2 软知识（SQLite + 文件双写）
     sectors/              # 板块知识
     patterns/             # 沉淀的模式
-    cot/                  # [P0] 研报提炼的 CoT
+    cot/                  # 研报提炼的 CoT
       <sector>/<yyyy-mm>_<source>.md
   theses/                 # 个股论点
-    user/                 # [P0] 用户写的论点，召回权重 2.0
+    user/                 # 用户写的论点，召回权重 2.0
       <ticker>_<yyyy-mm-dd>.md
   situations/             # L3 情景记忆（Frontmatter + md）
     MEMORY.md             # 索引
@@ -62,7 +82,8 @@ memory/                   # 持久化数据（git 管理，可读、可追溯）
     <hash>_<原名>         # fa cot raw <query> 可回溯；ingested_docs.raw_path 记录
   cache/                  # 数据缓存（pickle, 24h TTL，不入 git）
   benchmarks/             # 大盘基准缓存
-  agent.db                # SQLite 主库
+  agent.db                # SQLite 主库（不软链，各机本地一份）
+  _archive*/              # 统一备份/归档/软删除前缀（批量改前的备份都放这；loader 跳过；不入 git）
 ```
 
 ## 命名 & 编码约定
@@ -127,4 +148,17 @@ EODHD_API_KEY=...
 - 不要改 .env（红线，必须先问）
 - 不要 git push（红线）
 - 不要删 memory/ 目录任何内容（这是 agent 的"经验"，不可逆）
+- **批量改 memory/ 前先备份**：cot / theses / situations / knowledge 是 gitignore 的本地数据，无 git 兜底。retag / merge / rescore 等批处理前，先把目标目录复制到 `_archive_<操作>_bak_<YYYYMMDD>/`（`_archive` 前缀 loader 自动跳过，可回滚）。历史遗留的零散备份（`*_bak_*` / `*.bak.local.*`）保留不动，要清理先问我
+- **`agent.db` 绝不软链到 OneDrive/网盘**：双机同步 + 同时写会损坏 SQLite。各机本地一份，需要同步走手动 merge（见 DEV_NOTES「五点五」）
 - 加新依赖前先在这里登记，再装
+
+## 技术铁律（改相关代码前必看，违反会硬报错或静默坏数据）
+
+- **thinking block 必须原样回传**：DeepSeek v4 思考模式下，assistant content 含 `thinking` block，多轮 tool use 时必须连 `signature` 一起回传，否则 `400 content[].thinking must be passed back`。落盘/裁剪消息时用 `block.model_dump(exclude_none=True)` 保留 thinking / redacted_thinking，只留 text / tool_use 会炸（见 `fa/chat/repl.py::_blocks_to_dicts`）
+- **CoT 加载默认排除 `_archive*`**：loader `rglob` 会递归扫到归档 / 备份 / 软删除文件，必须过滤 `_archive` 路径段，否则 `fa cot list` 总数翻倍。凡"要保留但不该被扫描"的东西，一律放 `_archive` 前缀目录
+
+## Git 提交规范
+
+- commit 标题用 `feat / fix / chore / refactor / docs` 前缀；body 写"为什么"而非"做了什么"
+- 长 message 用 `git commit -F <file>`（PowerShell 会把 `-` 开头行当参数解析）
+- 提交后停在本地等我；push 是红线
