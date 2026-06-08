@@ -70,8 +70,9 @@ def _do_add_note(args: dict, state: dict) -> str:
         if not p.exists():
             return f"错误：文件不存在 {p}"
         ext = p.suffix.lower()
-        if ext in SUPPORTED_EXT:
+        if ext in SUPPORTED_EXT and ext not in {".md", ".markdown"}:
             # 研报文件 → 15 维深度 note（pdf/docx/pptx/xlsx/txt）
+            # 注：.md 虽在 SUPPORTED_EXT(能力集)，但「录入 note」语境视作用户论点，走下方 4 维分支
             from ..note_extractor import extract_12d
             from ..note_template import filled_dims
             from ..ingest import save_note_12d
@@ -105,7 +106,7 @@ def _do_add_note(args: dict, state: dict) -> str:
                     f"tags={'/'.join(tags) or '(无)'}\n"
                     f"  填了 {len(filled)}/15 维: {', '.join(filled[:8])}"
                     f"{'…' if len(filled) > 8 else ''}")
-        elif ext in {".md", ""}:
+        elif ext in {".md", ".markdown", ""}:
             raw_text = p.read_text(encoding="utf-8-sig")
             payload = raw_text if not comment else f"[评论] {comment}\n\n{raw_text}"
             extracted = auto_structure(ticker, payload)

@@ -391,7 +391,7 @@ def _quick_action(choice: str, state: dict) -> None:
 
     if choice == "1":
         print("  [上传研报 → 提炼 CoT]")
-        path = _ask("  文件路径 (pdf/pptx/docx/txt): ")
+        path = _ask("  文件路径 (pdf/pptx/docx/xlsx/txt/md): ")
         if not path:
             return
         comment = _ask("  一句话角度 / 重点 (可空): ") or ""

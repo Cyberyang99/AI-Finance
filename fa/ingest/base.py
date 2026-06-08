@@ -10,7 +10,10 @@ from .loaders.xlsx import load_xlsx
 from .loaders.pptx import load_pptx
 from .loaders.text import load_text
 
-SUPPORTED_EXT = {".pdf", ".docx", ".xlsx", ".xls", ".pptx", ".txt"}
+# 纯文本类（走 load_text，统一编码兜底）
+TEXT_EXT = {".txt", ".md", ".markdown"}
+# ingest_file 能抽文的全部格式（能力集）；研报/用户笔记的「路由」另由调用方/menu 决定
+SUPPORTED_EXT = {".pdf", ".docx", ".xlsx", ".xls", ".pptx"} | TEXT_EXT
 
 
 def clean_user_path(s: str) -> str:
@@ -83,7 +86,7 @@ def ingest_file(path: str | Path) -> dict:
         text, pages = load_xlsx(p)
     elif ext == ".pptx":
         text, pages = load_pptx(p)
-    elif ext == ".txt":
+    elif ext in TEXT_EXT:
         text, pages = load_text(p)
     else:
         raise ValueError(f"未实现: {ext}")

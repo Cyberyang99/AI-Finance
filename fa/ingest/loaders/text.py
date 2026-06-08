@@ -1,4 +1,4 @@
-"""纯文本 loader — .txt（研报/资料的纯文本投喂）."""
+"""纯文本 loader — .txt / .md / .markdown（研报/资料/纪要的纯文本投喂）."""
 
 from pathlib import Path
 

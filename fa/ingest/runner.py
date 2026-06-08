@@ -1,8 +1,8 @@
 """通用导入入口 — 按扩展名自动分流到 ingest 或 user note.
 
-设计：
-  .pdf/.docx/.xlsx/.xls/.pptx → 研报，走 cot_extractor 提炼 CoT
-  .md/.txt → 用户论点，走 user_note (要求文件名前缀含 ticker 或 frontmatter 含 ticker)
+设计（仅 import 目录自动分流的默认约定；chat menu 给了显式意图时以 menu 为准）：
+  .pdf/.docx/.xlsx/.xls/.pptx/.txt → 研报，走 cot_extractor 提炼 CoT
+  .md/.markdown → 用户论点，走 user_note (要求文件名前缀含 ticker 或 frontmatter 含 ticker)
 
 文件名约定:
   600519.SHG_xxx.md         → ticker=600519.SHG
@@ -18,7 +18,7 @@ from typing import Optional
 from .base import SUPPORTED_EXT
 
 
-USER_NOTE_EXT = {".md"}   # .txt 归研报(走 CoT 提取)；用户笔记用 .md
+USER_NOTE_EXT = {".md", ".markdown"}   # .txt 归研报(走 CoT 提取)；用户笔记用 .md
 ALL_IMPORT_EXT = SUPPORTED_EXT | USER_NOTE_EXT
 
 
@@ -67,10 +67,12 @@ def detect_ticker_from_frontmatter(text: str) -> Optional[str]:
 def classify_file(path: Path) -> str:
     """返回 'research'（研报）/ 'user_note' / 'skip'."""
     ext = path.suffix.lower()
-    if ext in SUPPORTED_EXT:
-        return "research"
+    # 先判用户笔记：.md 同时落在 SUPPORTED_EXT(能力集) 与 USER_NOTE_EXT，
+    # 目录自动分流默认把 .md 当用户论点（chat menu 显式选「提炼 CoT」时不走这里）
     if ext in USER_NOTE_EXT:
         return "user_note"
+    if ext in SUPPORTED_EXT:
+        return "research"
     return "skip"
 
 
