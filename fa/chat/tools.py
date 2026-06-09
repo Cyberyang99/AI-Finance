@@ -820,17 +820,20 @@ TOOLS_SPEC = [
         "name": "edit_cot_chain",
         "description": ("链级纠错：按 cot_id 改/删**单条** CoT 链（其余链不动）。用户要纠正某条的"
                         "主题/信号分/标题/推理链，或删掉某条没价值/重复的链时用。cot_id 从 list_cot/"
-                        "search_memory 输出的 `id=` 取。set_tags 必须是闭合词表主题（越界会被拒）。"
-                        "delete=true 只删这一条且回显被删全文可恢复。改前用一句话说清改的是哪条、改成什么。"),
+                        "search_memory 输出的 `id=` 取（是持久 uid，删别的链不会变）。set_tags 必须是闭合词表主题（越界会被拒）。"
+                        "**删除是两段式**：先 delete=true（不带 confirm）拿到预览，把『即将删 信号X「trigger」』"
+                        "给用户看、等用户明确同意，再带 delete=true + confirm=true 重发同一 cot_id 才真删（被删块归档到 _archive/ 可恢复）。"
+                        "改前用一句话说清改的是哪条、改成什么。"),
         "input_schema": {
             "type": "object",
             "properties": {
-                "cot_id": {"type": "string", "description": "目标链 id，形如 <hash>_<n>（来自 list_cot/search_memory）"},
+                "cot_id": {"type": "string", "description": "目标链 id，形如 <hash>_<uid>（来自 list_cot/search_memory，持久不漂移）"},
                 "set_tags": {"type": "array", "items": {"type": "string"}, "description": "新主题（闭合词表 name_cn），覆盖该链主题；传 [] 清空"},
                 "set_signal": {"type": "integer", "description": "新信号分 1-10"},
                 "set_trigger": {"type": "string", "description": "新 trigger 标题文字"},
                 "set_cot": {"type": "string", "description": "新推理链正文"},
-                "delete": {"type": "boolean", "description": "true=删除这条链（可恢复，回显被删内容）"},
+                "delete": {"type": "boolean", "description": "true=删除这条链。不带 confirm 时只回预览不删"},
+                "confirm": {"type": "boolean", "description": "配合 delete=true：true 才真删。务必在用户看过预览并同意后才传"},
             },
             "required": ["cot_id"],
         },
@@ -1079,14 +1082,23 @@ def _do_edit_cot_chain(args: dict, state: dict) -> str:
         set_trigger=args.get("set_trigger"),
         set_cot=args.get("set_cot"),
         delete=bool(args.get("delete")),
+        confirm=bool(args.get("confirm")),
     )
     if res.get("error"):
         return f"✗ {res['error']}"
+    if res.get("preview"):
+        b = res.get("before", {})
+        return ("⚠ 删除预览（未执行，需用户确认）：\n"
+                f"  即将删 [{res['cot_id']}] 信号{b.get('signal', '?')}/10"
+                f" 主题={b.get('tags') or '(无)'}\n"
+                f"  「{b.get('trigger', '')}」\n"
+                f"  删后该文件剩 {res.get('remaining_if_deleted', '?')} 条。"
+                "请把这条给用户确认；用户同意后带 confirm=true 重发才真删。")
     b = res.get("before", {})
     lines = [f"✓ [{res['cot_id']}] {b.get('trigger', '')[:40]}",
              f"  操作: {res['action']}"]
     if res.get("removed_block") is not None:
-        lines.append(f"  剩余 {res['remaining']} 条。被删内容（在此可恢复）：")
+        lines.append(f"  剩余 {res['remaining']} 条。已归档到 {res.get('archived_to', '_archive/')}（可恢复）。被删内容：")
         lines.append("  " + res["removed_block"].replace("\n", "\n  ")[:600])
     else:
         a = res.get("after", {})

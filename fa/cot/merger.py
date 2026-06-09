@@ -15,6 +15,7 @@
 
 import json
 import re
+import secrets
 import shutil
 from datetime import date
 from pathlib import Path
@@ -246,17 +247,23 @@ def _write_merged_file(sector: str, merged_cots: list[dict],
     ])
     if tags:
         lines.extend(["**主题 tags**: " + " · ".join(f"#{t}" for t in tags), ""])
+    _seen_uids: set = set()
     for i, c in enumerate(merged_cots, 1):
         src_count = len(c.get("_source_ids", []))
         merge_tag = f" (合并自 {src_count} 条)" if src_count > 1 else ""
+        uid = secrets.token_hex(3)
+        while uid in _seen_uids:
+            uid = secrets.token_hex(3)
+        _seen_uids.add(uid)
         lines.extend([
             f"## CoT {i} — {c['trigger']}{merge_tag}",
             "",
+            f"**id**: {uid}",
         ])
         chain_tags = [t for t in (c.get("tags") or []) if t]
         if chain_tags:
             lines.append(f"**主题**: {'、'.join(chain_tags)}")
-            lines.append("")
+        lines.append("")
         # 子分行（与单篇格式一致，缺失则只写 signal）
         if all(c.get(k) for k in ("transmission", "falsifiability", "history", "recency")):
             lines.append(

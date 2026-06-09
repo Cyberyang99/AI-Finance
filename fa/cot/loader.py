@@ -82,6 +82,9 @@ def _parse_cot_body(body: str) -> list[dict]:
             continue
         m_trig = re.match(r"^## CoT \d+ — (.+?)$", block.split("\n", 1)[0])
         trigger = m_trig.group(1).strip() if m_trig else ""
+        # 持久 chain uid（**id**: a3f9c1），v5 起；旧文件无此行 → _uid=None，loader 回退位置号
+        m_uid = re.search(r"(?m)^\*\*id\*\*:\s*([0-9a-f]{4,8})\b", block)
+        uid = m_uid.group(1) if m_uid else None
         # 链级主题 tag（**主题**: a、b），v4 起；旧文件无此行 → chain_tag_line=False，由 load_cots 回退文件级
         m_ctag = re.search(r"^\*\*主题\*\*:\s*(.+)$", block, re.MULTILINE)
         chain_tag_line = m_ctag is not None
@@ -120,7 +123,7 @@ def _parse_cot_body(body: str) -> list[dict]:
                       if m_src else [])
         if trigger and cot_text:
             item = {"trigger": trigger, "COT": cot_text, "signal": signal, "evidence": evidence,
-                    "_chain_tags": chain_tags, "_chain_tag_line": chain_tag_line}
+                    "_chain_tags": chain_tags, "_chain_tag_line": chain_tag_line, "_uid": uid}
             if source_ids:
                 item["_source_ids"] = source_ids
             item.update(sub_scores)
@@ -191,7 +194,8 @@ def load_cots(sector: Optional[str] = None, ticker: Optional[str] = None,
                 "_ticker": fm.get("ticker", ""),
                 "_tags": eff_tags,
                 "_created_at": fm.get("created_at", ""),
-                "_cot_id": f"{fm.get('source_hash', fp.stem)}_{i}",
+                # 稳定 id 优先用持久 uid；未回填的存量链回退位置号 i（删一条会偏移，回填后消除）
+                "_cot_id": f"{fm.get('source_hash', fp.stem)}_{c.get('_uid') or i}",
                 "_quality_rating": quality_rating,
                 "_file_path": str(fp),
             })

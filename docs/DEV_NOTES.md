@@ -80,6 +80,37 @@ LLM 给的分先校验：若偏离客观分 > 0.2，强制拉回。
 **为什么**：笔记 frontmatter 含 `source_thesis: 2513.HK` 等字段，暴露用户研究标的。
 **特例**：可用 `git add -f` 手动同步特别重要的笔记。
 
+### 9. 不上向量库 / RAG —— 何时才加 embedding（2026-06-08）
+
+记忆检索**不用 embedding / 向量库**，靠两条结构化路径：
+- CoT：`tag` 闭合词表（`sectors.yaml`）精确过滤 → 候选（`cot/loader.load_cots`）
+- 情境笔记：把 `MEMORY.md` 索引全量喂 LLM，让 LLM 选 Top-K（`agents/recall.py`）
+
+存储是「文件存正文 + SQLite 存元数据」，**不是向量库**：`agent.db` 只有 `ingested_docs/patterns/reviews/theses/performance/sector_knowledge` 等元数据表，**无 CoT 正文表**（227 条链全在 `memory/knowledge/cot/*.md`）。
+
+**为什么不用向量**（`recall.py` docstring + PDF2 §2.2.3 实证）：笔记 < 100 条时「LLM 全量判断比 embedding 准」；向量是「内容多到 LLM 看不过来」才需要的压缩+近似检索妥协。当前规模（227 链 / 8 tag）下——① 候选能全量喂 LLM，让 LLM 当裁判比 cosine 聪明；② tag 召回**可追溯**（知道凭哪个 tag 召回），向量只给说不清的相似度分，投研要可追溯；③ 精确过滤几乎无假阳性、文件+SQLite 零运维。
+
+**局限**：纯 tag 过滤的召回率吃标注质量——相关链没打所查 tag 就漏（情境笔记走 LLM 全量索引已规避；CoT 纯 tag 路理论上会漏跨主题语义关联）。
+
+**何时才加（升级触发，现在没到）**：链/笔记到**几百上千条**、且明显感到「写过相关的、但 tag 没对上被漏」。届时——
+- **加一路 embedding 做补充召回**（与 tag 过滤并联、二次扩召回），**不是替换** tag、不推翻现架构；
+- 本地 `FAISS` 或 `sqlite-vec` 即可，**不需要独立向量数据库**（Chroma/Milvus/pgvector）；
+- 闭合词表 + LLM 判断仍是主路，embedding 只做「tag 漏了兜底」。
+
+### 10. chain 身份用持久 uid，不用位置号（2026-06-09）
+
+**触发**：`fa chat` 里用 `edit_cot_chain` 删一条重复链，连环误删了 merged 文件里 3 条高分链。根因——旧 `_cot_id = source_hash_<位置序号 i>`，删/加任一链则其后全部 id 偏移一位：list 时记下的 id 删一条后就指向隔壁链（删错），agent target 不到就反复换 id 重试（撞工具循环上限）。**误删 + 撞上限是同一个根。**
+
+**决策**：每条 CoT 落盘带 `**id**: <6hex>` 持久 uid，`_cot_id = source_hash_<uid>`，显示号 `## CoT N` 退化为纯装饰。`edit_chain` 按 uid 解析目标（回退旧位置号兼容存量），删兄弟链时其余 uid 不变。配套：①链级删除归档到 `_archive/deleted-chains-YYYYMMDD.md`（此前链级删除根本不备份，工具描述"可恢复"是假的）②删除两段式——不带 `confirm` 只回预览不删 ③`fa cot stamp-ids` 存量回填（自动备份）。
+
+**顺手修的既存 bug**：`write_cots_to_file`（rescore/reclassify 重写盘）只写 header/信号/推理链，静默丢 `**主题**`/`**原文依据**`/`来源 CoT id`——已补全为完整 block。
+
+**为什么不上自增主键/数据库托管 id**：CoT 是人可读 md，id 必须随文件走、可眼检、可手改（"文件即 UI"）。随机 6hex 落在正文里最省事，碰撞概率可忽略且按文件查重。详见技术铁律。
+
+### 11. chat 工具循环上限可配（2026-06-09）
+
+`run_repl` 上限从写死 8 改为读 `FA_CHAT_MAX_ITER`（默认 15）。根因（位置号导致的重试风暴）已由 #10 消除，15 足够；保留 env 旋钮给长任务兜底。
+
 ## 三、技术踩坑
 
 ### Windows 编码问题（系统性）

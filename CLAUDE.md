@@ -126,6 +126,7 @@ fa deep 2513.HK                 # 端到端冒烟（DeepSeek 真实调用）
 | **Tier 1.7** | 链级主题 tag（classify_chains + retag-chains 回填）+ 合并可追溯（source_hashes）+ chat 查询修死循环/降噪 + 上传意图询问 | ✅ |
 | **Tier 1.8** | 查询体验：tag 模糊解析（resolve_theme_tag）+ 去空格匹配 + list_cot 排序/带 id/不再继承 sector + 链级纠错 edit_cot_chain（改主题/分/正文/删单条，闭合词表守门） | ✅ |
 | **Tier 1.9** | 召回反馈闭环：theses.recalled_note_ids 记预测时召回的情境笔记 + note_recall_stats 算每条笔记胜率 + fa evolve 列"僵尸笔记"（召回≥2 次胜率<50%，只提示不自动删） | ✅ |
+| **Tier 1.10** | 持久 chain uid 根治删错：每链 `**id**` 落盘 + edit/delete 按 uid 解析（删兄弟链不漂移）+ 两段式删除确认 + 链级删除归档 `_archive/deleted-chains-*` + `fa cot stamp-ids` 回填；顺修 `write_cots_to_file` 丢 主题/证据/来源id；chat 循环上限走 `FA_CHAT_MAX_ITER`（默认 15） | ✅ |
 | Tier 2 | **fa chat 体验升级（rich UI + 上下文裁剪/会话持久化 + search/get 召回 + 软删除/合并）✅** ; Web UI / 微信 bot / 多 workspace ⏳ | 🔵 进行中 |
 | Tier 3 | Mem-Palace 层级 + GEPA 进化 + CoT 单链回测 + 多模态 | ⏳ |
 
@@ -156,6 +157,7 @@ EODHD_API_KEY=...
 
 - **thinking block 必须原样回传**：DeepSeek v4 思考模式下，assistant content 含 `thinking` block，多轮 tool use 时必须连 `signature` 一起回传，否则 `400 content[].thinking must be passed back`。落盘/裁剪消息时用 `block.model_dump(exclude_none=True)` 保留 thinking / redacted_thinking，只留 text / tool_use 会炸（见 `fa/chat/repl.py::_blocks_to_dicts`）
 - **CoT 加载默认排除 `_archive*`**：loader `rglob` 会递归扫到归档 / 备份 / 软删除文件，必须过滤 `_archive` 路径段，否则 `fa cot list` 总数翻倍。凡"要保留但不该被扫描"的东西，一律放 `_archive` 前缀目录
+- **chain uid 是持久身份，不可漂移（v5 起）**：每条 CoT 落盘带 `**id**: <6hex>` 行，`_cot_id = <source_hash>_<uid>`。**所有从结构重写链的渲染器（`merger._write_merged_file` / `cot_extractor.save_cot_file` / `local_ops.write_cots_to_file`）必须发 uid；就地改 block 的路径（`edit_chain` / `_rewrite_with_chain_tags`）必须原样保留 `**id**` 行**——漏发=新链无身份；删行=edit/delete 退回位置号，删一条全体偏移、再现连环误删。`edit_chain` 按 uid 解析目标（回退旧位置号），删除两段式（无 `confirm` 只回预览）+ 被删块归档到 `_archive/deleted-chains-*.md`。存量补 uid 用 `fa cot stamp-ids`（自动备份）
 
 ## Git 提交规范
 

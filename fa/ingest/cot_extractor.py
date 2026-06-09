@@ -12,6 +12,7 @@ v2 升级（2026-05-26）:
 
 import json
 import re
+import secrets
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -563,13 +564,19 @@ def save_cot_file(cots: list[dict], ticker: Optional[str], sector: Optional[str]
             user_comment.strip(),
             "",
         ])
+    _seen_uids: set = set()
     for i, c in enumerate(cots, 1):
+        uid = secrets.token_hex(3)
+        while uid in _seen_uids:
+            uid = secrets.token_hex(3)
+        _seen_uids.add(uid)
         lines.append(f"## CoT {i} — {c['trigger']}")
         lines.append("")
+        lines.append(f"**id**: {uid}")
         chain_tags = [t for t in (c.get("tags") or []) if t]
         if chain_tags:
             lines.append(f"**主题**: {'、'.join(chain_tags)}")
-            lines.append("")
+        lines.append("")
         lines.extend([
             f"**信号强度**: {c['signal']}/10  "
             f"_(传导 {c.get('transmission', '?')} · 证伪 {c.get('falsifiability', '?')} · "

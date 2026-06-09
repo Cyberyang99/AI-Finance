@@ -9,11 +9,26 @@
 """
 
 import re
+import secrets
 from datetime import date
 from pathlib import Path
 from typing import Optional
 
 from .loader import COT_DIR, list_cot_files, _parse_frontmatter, _parse_cot_body, _parse_tags
+
+
+def _gen_uid(existing: Optional[set] = None) -> str:
+    """生成 6 位 hex 持久 chain uid，避开同文件内已有的。"""
+    existing = existing or set()
+    while True:
+        uid = secrets.token_hex(3)
+        if uid not in existing:
+            return uid
+
+
+def _chain_uids_in(text: str) -> set:
+    """抽出一段文本里所有 `**id**:` uid，用于同文件查重。"""
+    return set(re.findall(r"(?m)^\*\*id\*\*:\s*([0-9a-f]{4,8})\b", text))
 
 
 def find_cot_file(query: str) -> Optional[Path]:
@@ -29,8 +44,8 @@ def find_cot_file(query: str) -> Optional[Path]:
     if not query:
         return None
     q = query.lower()
-    # 剥掉 cot_id 尾部的 `_<数字>`，得到用于匹配 source_hash 的纯 hash 段
-    q_hash = re.sub(r"_\d+$", "", q)
+    # 剥掉 cot_id 尾部的链标识（持久 uid `_<6hex>` 或旧位置号 `_<数字>`），得到 source_hash 段
+    q_hash = re.sub(r"_([0-9a-f]{4,8}|\d+)$", "", q)
     files = list_cot_files()
     if not files:
         return None
@@ -249,6 +264,64 @@ def retag_all_chains(dry_run: bool = False) -> dict:
             "dry_run": dry_run}
 
 
+def stamp_file_ids(fp: Path) -> dict:
+    """给单个 CoT 文件里缺 `**id**` 的链补发持久 uid（已有的不动）。就地改文本，不重排。"""
+    try:
+        text = fp.read_text(encoding="utf-8")
+    except Exception as e:
+        return {"file": fp.name, "skipped": f"读取失败: {e}"}
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {"file": fp.name, "skipped": "无 frontmatter"}
+    pre, fm_str, body = parts
+    existing = _chain_uids_in(body)
+    segs = re.split(r"(?m)(?=^## CoT \d+ — )", body)
+    stamped = 0
+    for i, blk in enumerate(segs):
+        if not blk.lstrip().startswith("## CoT"):
+            continue
+        if re.search(r"(?m)^\*\*id\*\*:\s*[0-9a-f]{4,8}\b", blk):
+            continue
+        uid = _gen_uid(existing)
+        existing.add(uid)
+        segs[i] = re.sub(r"(^## CoT \d+ — [^\n]*\n\n?)",
+                         lambda m: m.group(1) + f"**id**: {uid}\n", blk, count=1)
+        stamped += 1
+    if stamped:
+        fp.write_text(pre + "---" + fm_str + "---" + "".join(segs), encoding="utf-8")
+    return {"file": fp.name, "stamped": stamped}
+
+
+def stamp_ids_all_files(dry_run: bool = False) -> dict:
+    """全库回填持久 chain uid。真跑前全量备份到 _archive_stampid_bak_YYYYMMDD/。"""
+    import shutil
+    files = list_cot_files()
+    if not files:
+        return {"files": [], "note": "CoT 库为空"}
+    if dry_run:
+        reports = []
+        for fp in files:
+            try:
+                body = fp.read_text(encoding="utf-8").split("---", 2)[-1]
+            except Exception:
+                continue
+            n_chains = len(re.findall(r"(?m)^## CoT \d+ — ", body))
+            n_have = len(_chain_uids_in(body))
+            reports.append({"file": fp.name, "missing": n_chains - n_have, "total": n_chains})
+        return {"files": reports, "dry_run": True,
+                "total_missing": sum(r["missing"] for r in reports)}
+
+    today = date.today().strftime("%Y%m%d")
+    backup_root = COT_DIR / f"_archive_stampid_bak_{today}"
+    for fp in files:
+        dst = backup_root / fp.relative_to(COT_DIR)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(fp, dst)
+    reports = [stamp_file_ids(fp) for fp in files]
+    return {"files": reports, "backup": str(backup_root),
+            "total_stamped": sum(r.get("stamped", 0) for r in reports)}
+
+
 def _chain_brief(block: str) -> dict:
     """从单个 CoT 块文本抽 trigger/signal/主题/COT 片段，用于改前回显。"""
     cots = _parse_cot_body(block)
@@ -261,13 +334,15 @@ def _chain_brief(block: str) -> dict:
 
 def edit_chain(cot_id: str, set_tags=None, set_signal=None,
                set_trigger: Optional[str] = None, set_cot: Optional[str] = None,
-               delete: bool = False) -> dict:
-    """链级纠错：按 cot_id 改/删单条 CoT 链。改前回显，delete 回显被删全文（可恢复）。
+               delete: bool = False, confirm: bool = False) -> dict:
+    """链级纠错：按 cot_id 改/删单条 CoT 链。改前回显，delete 把被删块归档到 _archive/（可恢复）。
 
-    - cot_id 形如 <source_hash>_<n>，n 与 load_cots 的链序号一致。
+    - cot_id 形如 <source_hash>_<链标识>：链标识优先按持久 uid 解析（删兄弟链不偏移），
+      回退旧位置号 _N。两者都从 list_cot/search_memory 最新输出取。
     - set_tags：主题（list[str]），过闭合词表 _valid_theme_tag，越界报错不写。
     - set_signal：1-10。set_trigger / set_cot：改标题 / 推理链文字。
-    - delete：删整块、其后链号前移、cot_count-1（删到 0 条则拒绝，改用 delete_cot）。
+    - delete：默认两段式——不带 confirm 只回预览不删；confirm=True 才真删（删块归档可恢复，
+      其后链号前移、cot_count-1，删到 0 条则拒绝改用 delete_cot）。
     - 任一结构性变更后重算 frontmatter tags 并集 + 主题展示行 + cot_count。
     """
     from ..sectors import _valid_theme_tag
@@ -275,22 +350,35 @@ def edit_chain(cot_id: str, set_tags=None, set_signal=None,
     fp = find_cot_file(cot_id)
     if not fp:
         return {"error": f"找不到匹配 '{cot_id}' 的 CoT 文件"}
-    m_n = re.search(r"_(\d+)$", cot_id)
-    if not m_n:
-        return {"error": f"cot_id '{cot_id}' 缺少链序号后缀 _N（用 list_cot/search_memory 给的完整 id）"}
-    n = int(m_n.group(1))
-
     text = fp.read_text(encoding="utf-8")
     parts = text.split("---", 2)
     if len(parts) < 3:
         return {"error": "文件格式异常（无 frontmatter）"}
     pre, fm_str, body = parts
     segs = re.split(r"(?m)(?=^## CoT \d+ — )", body)
-    # segs[0]=preamble；segs[i]=第 i 条链（1-based）
+    # segs[0]=preamble；其余每段一条链
     cot_idxs = [i for i, s in enumerate(segs) if s.lstrip().startswith("## CoT")]
-    if not (1 <= n <= len(cot_idxs)):
-        return {"error": f"该文件只有 {len(cot_idxs)} 条链，没有第 {n} 条"}
-    seg_i = cot_idxs[n - 1]
+    if not cot_idxs:
+        return {"error": "该文件没有可解析的 CoT 链"}
+
+    # 目标解析：优先按持久 uid（稳定，删兄弟链不偏移），回退旧位置号 _N
+    tail = cot_id.rsplit("_", 1)[-1].lower()
+    uid_to_seg = {}
+    for si in cot_idxs:
+        mu = re.search(r"(?m)^\*\*id\*\*:\s*([0-9a-f]{4,8})\b", segs[si])
+        if mu:
+            uid_to_seg[mu.group(1)] = si
+    if tail in uid_to_seg:
+        seg_i = uid_to_seg[tail]
+        n = cot_idxs.index(seg_i) + 1
+    elif tail.isdigit():
+        n = int(tail)
+        if not (1 <= n <= len(cot_idxs)):
+            return {"error": f"该文件只有 {len(cot_idxs)} 条链，没有第 {n} 条"}
+        seg_i = cot_idxs[n - 1]
+    else:
+        return {"error": f"cot_id '{cot_id}' 的链标识 '{tail}' 在该文件里找不到"
+                         f"（uid 不匹配且非位置号）。请用 list_cot/search_memory 最新输出的 id"}
     block = segs[seg_i]
     before = _chain_brief(block)
 
@@ -313,7 +401,23 @@ def edit_chain(cot_id: str, set_tags=None, set_signal=None,
     if delete:
         if len(cot_idxs) <= 1:
             return {"error": "这是该文件唯一一条链，删它请用 delete_cot 软删整份（可恢复）"}
+        if not confirm:
+            # 两段式：先回显将删哪条，未落盘；确认后带 confirm=true 重发才真删
+            return {"preview": True, "cot_id": cot_id, "n": n, "before": before,
+                    "remaining_if_deleted": len(cot_idxs) - 1,
+                    "note": "删除预览（未执行）。确认无误后带 confirm=true 重发同一 cot_id 才真删。"}
         removed_block = segs[seg_i].rstrip()
+        # 链级删除也要可恢复：把被删块归档到 _archive/deleted-chains-YYYYMMDD.md（loader 跳过 _archive*）
+        today = date.today().strftime("%Y%m%d")
+        archive_dir = fp.parent / "_archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        graveyard = archive_dir / f"deleted-chains-{today}.md"
+        del_uid = (re.search(r"(?m)^\*\*id\*\*:\s*([0-9a-f]{4,8})\b", removed_block) or [None, "?"])[1]
+        from datetime import datetime as _dt
+        header = (f"\n\n<!-- 删除于 {_dt.now():%Y-%m-%d %H:%M:%S} · 源文件 {fp.name} · "
+                  f"id {del_uid} · {before.get('trigger', '')[:50]} -->\n")
+        with graveyard.open("a", encoding="utf-8") as f:
+            f.write(header + removed_block + "\n")
         del segs[seg_i]
         action_parts.append("删除整条")
     else:
@@ -375,6 +479,7 @@ def edit_chain(cot_id: str, set_tags=None, set_signal=None,
     if delete:
         report["removed_block"] = removed_block
         report["remaining"] = len(remaining)
+        report["archived_to"] = f"{archive_dir.name}/{graveyard.name}"
     else:
         # after 快照
         new_segs = re.split(r"(?m)(?=^## CoT \d+ — )", new_body)
@@ -450,20 +555,36 @@ def write_cots_to_file(fp: Path, fm: dict, cots: list[dict], extra_header: str =
     if fm.get("user_comment"):
         lines.extend(["## 🗨 用户角度提示", "", str(fm["user_comment"]).strip(), ""])
 
+    existing_uids = {c["_uid"] for c in cots if c.get("_uid")}
     for i, c in enumerate(cots, 1):
+        uid = c.get("_uid")
+        if not uid:
+            uid = _gen_uid(existing_uids)
+            existing_uids.add(uid)
+        lines.append(f"## CoT {i} — {c['trigger']}")
+        lines.append("")
+        lines.append(f"**id**: {uid}")
+        chain_tags = [t for t in (c.get("_chain_tags") or []) if t]
+        if chain_tags:
+            lines.append(f"**主题**: {'、'.join(chain_tags)}")
+        lines.append("")
         sub_line = ""
         if "transmission" in c and "history" in c and "recency" in c:
             fals = f" · 证伪 {c['falsifiability']}" if c.get("falsifiability") is not None else ""
             sub_line = (f"  _(传导 {c['transmission']}{fals} · 历史 {c['history']} · "
                         f"时效 {c['recency']})_")
         lines.extend([
-            f"## CoT {i} — {c['trigger']}",
-            "",
             f"**信号强度**: {c['signal']}/10{sub_line}",
             "",
             f"**推理链**: {c['COT']}",
             "",
         ])
+        ev = str(c.get("evidence", "")).strip()
+        if ev:
+            lines.extend([f"**原文依据**: 「{ev}」", ""])
+        src_ids = c.get("_source_ids") or []
+        if len(src_ids) > 1:
+            lines.extend([f"_来源 CoT id: {', '.join(src_ids)}_", ""])
 
     fp.write_text("\n".join(lines), encoding="utf-8")
 

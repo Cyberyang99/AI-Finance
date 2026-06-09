@@ -186,6 +186,9 @@ def main():
     pcot_rt = cotsub.add_parser("retag-chains", help="存量回填：给每条 CoT 补链级主题 tag（闭合词表）")
     pcot_rt.add_argument("--dry-run", action="store_true", help="只预览每条链将打的 tag，不写盘")
 
+    pcot_si = cotsub.add_parser("stamp-ids", help="存量回填：给每条 CoT 补持久 uid（删链不再漂移）")
+    pcot_si.add_argument("--dry-run", action="store_true", help="只统计缺 id 的链数，不写盘")
+
     # vet - 逻辑校验器（合成层：用 CoT+note 审一只股/一个想法）
     pvet = sub.add_parser("vet", help="逻辑校验器：输入个股(+可选想法)，用已有 CoT+note 打分/补充/写反逻辑")
     pvet.add_argument("ticker", help="标的代码，如 2513.HK")
@@ -1085,6 +1088,10 @@ def _cmd_cot(args):
         _cmd_cot_retag(dry_run=getattr(args, "dry_run", False))
         return
 
+    if args.cot_cmd == "stamp-ids":
+        _cmd_cot_stamp_ids(dry_run=getattr(args, "dry_run", False))
+        return
+
     if args.cot_cmd == "score":
         ticker = args.ticker.upper()
         print(f"[COT-SCORE] {ticker}")
@@ -1346,6 +1353,36 @@ def _cmd_cot_retag(dry_run: bool = False):
         print(f"  备份已存: {res['backup']}（loader 自动跳过，可回滚）")
     if dry_run:
         print(f"  确认无误后去掉 --dry-run 真跑：fa cot retag-chains")
+
+
+def _cmd_cot_stamp_ids(dry_run: bool = False):
+    """存量回填：给每条 CoT 补持久 uid。dry-run 统计；真跑前自动全量备份。"""
+    from .cot.local_ops import stamp_ids_all_files
+
+    mode = "预览（不写盘）" if dry_run else "真跑（先备份再写）"
+    print(f"[COT-STAMP-IDS] 全库持久 uid 回填 — {mode}")
+    res = stamp_ids_all_files(dry_run=dry_run)
+    files = res.get("files", [])
+    if not files:
+        print(f"  {res.get('note', '无文件')}")
+        return
+
+    if dry_run:
+        for r in files:
+            if r.get("missing"):
+                print(f"  · {r['file']}: 缺 {r['missing']}/{r['total']} 条待补")
+        print(f"\n[COT-STAMP-IDS] 预计补 {res.get('total_missing', 0)} 条链。"
+              f"去掉 --dry-run 真跑：fa cot stamp-ids")
+        return
+
+    for r in files:
+        if r.get("skipped"):
+            print(f"  ⊘ {r['file']}: {r['skipped']}")
+        elif r.get("stamped"):
+            print(f"  ✓ {r['file']}: 补 {r['stamped']} 条")
+    print(f"\n[COT-STAMP-IDS] 完成: 共补 {res.get('total_stamped', 0)} 条 uid")
+    if res.get("backup"):
+        print(f"  备份已存: {res['backup']}（loader 自动跳过，可回滚）")
 
 
 def _cmd_cot_regroup(query: str, dry_run: bool = False):
