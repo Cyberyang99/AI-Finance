@@ -94,12 +94,12 @@ fa cot score <ticker>               # 用 CoT 给单股打分
 fa cot vote T1 T2 T3                # 多股投票出持仓清单
 ```
 
-### 进化
+### 进化（⚠ review/reflect/evolve 已冻结 2026-06-10，见下方「冻结」区；cot merge 仍活跃）
 ```bash
-fa review [-d 0]                    # 触发回顾 (-d 0 强制触发，正常 90 天后自动)
-fa reflect <ticker>                 # 单股强制反思
+fa review [-d 0]                    # 触发回顾（冻结：闭环不再投入）
+fa reflect <ticker>                 # 单股强制反思（冻结）
 fa cot merge                        # 同 sector CoT 合并去重，建议摄入 5+ 份后跑
-fa evolve                           # 偏差分析 + 框架更新建议
+fa evolve                           # 偏差分析 + 框架更新建议（冻结）
 ```
 
 ### 元
@@ -158,15 +158,34 @@ fa config                           # 看配置
 
 ---
 
-## Tier 3 — 战略级（等数据攒够再做）
+## Tier 3 — 战略级（触发器仍活着的）
 
 | 内容 | 何时做 |
 |---|---|
-| **Mem-Palace 层级记忆**（wing/room/drawer + 时序知识图谱） | 情境笔记 > 100 条时 |
-| **GEPA 反思式进化**（Evolver 读完整轨迹自动改 system prompt） | 跑过 50+ 次 review，有足够"失败/成功"案例时 |
-| **CoT 单链回测**（PDF1 后半段：每条 CoT 月频选股算 IR） | 拉历史月度财务+股价数据后；适合做某个板块的 alpha 因子 |
+| **embedding 补充召回**（与 tag 过滤并联的兜底，本地 FAISS/sqlite-vec，见 DEV_NOTES 二.9） | 真实感到「明明写过却没召回」时（链数阈值 2026-06-10 已到 813 条，只差体感条件） |
 | **多模态摄入**（图表识别） | 文本闭环已稳定使用 3-6 个月后 |
-| **跨 Sector CoT 关联**（不同板块的相似逻辑） | Mem-Palace 之后 |
+
+---
+
+## 冻结（2026-06-10 审察决定）
+
+> 背景：项目按"两条腿"设计——腿 A 知识合成（ingest→CoT/note→召回→vet/report），
+> 腿 B 预测进化（论点→回顾→Critic→Reflector→Evolver）。实际使用只走腿 A；
+> 下面这些功能的解锁数据只能由腿 B 生产，腿不动指标永远不涨。
+> 根因：概率校准需要密集反馈，投资一年只有几十个可验证预测、周期数月、归因噪声大，
+> 单人攒不出统计意义（与"不做清单"里拒绝 RL/LoRA 同一个理由）。
+> **代码全部保留（红线：不删），但不维护、不投入、不进验证纪律。**
+> 学习改走「点评沉淀」：用户点评 → `memory/framework/review-rules.md` → 注入 vet/report 合成提示词，人审入库。
+
+| 冻结项 | 复活条件 |
+|---|---|
+| 预测进化闭环（`fa review/review2/critique/reflect/evolve` + critic/reflector/conflict + predictions/performance/evolution + Tier 1.9 召回反馈/僵尸笔记） | 用户重启「建仓论点→定期回顾」的真实工作流 |
+| **Mem-Palace 层级记忆**（wing/room/drawer + 时序知识图谱） | 闭环重启，且情境笔记 > 100 条 |
+| **GEPA 反思式进化**（Evolver 读完整轨迹自动改 system prompt） | 闭环重启，且真实 review ≥ 50 次 |
+| **CoT 单链回测**（每条 CoT 月频选股算 IR） | 出现「哪条链可信」的真实痛点，且愿意建月频历史数据管线；定性链回测本身模糊，谨慎 |
+| **跨 Sector CoT 关联** | 随 Mem-Palace |
+
+`fa deep` 不冻结但降级：当快速五维分析用；它尾巴上的预测注册无人回顾，不再是验证纪律的冒烟命令。
 
 ---
 

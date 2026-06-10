@@ -51,12 +51,72 @@ fa deep 2513.HK                      # 全套分析，3-5 分钟
 - save_thesis 入库
 - 可能 save_pattern 沉淀新发现的模式
 
+### 想校验一个逻辑（vet，不入库、不注册预测）
+```bash
+# 单股：用全库 CoT+note 审一只票（可带你的想法，文本或研报文件）
+fa vet 2513.HK
+fa vet 2513.HK -i "智谱的护城河是B端政企关系"
+fa vet 2513.HK -i ~/Desktop/我的逻辑.docx
+
+# 纯观点：不带标的，按观点主题召回，校验完顺带映射到库内相关标的
+fa vet -i "AI推理需求爆发会让国产算力芯片供不应求"
+fa vet -i "..." --tag "AI 算力"          # 可选：主题先过滤（闭合词表，fa sectors 查）
+
+# 批量轻量扫描：清单进、Excel 出（汇总 + 命中明细两个 sheet）
+fa vet --batch "2513.HK,2015.HK,GEV.US"   # 内联清单
+fa vet --batch 自选股.xlsx                 # 表头识别：代码/ticker 列 + 观点/idea 列
+fa vet --batch 名单.txt                    # 每行一个标的，后面可跟观点
+```
+
+- 单股/观点输出 markdown 到桌面；批量输出 `vet_batch_<时间>.xlsx` 到桌面
+- 批量是轻量版：每股 1 次 LLM 调用，CoT 目录放 prompt 前缀吃 DeepSeek 自动缓存
+- 清单里无后缀的输入（公司名/裸代码）走模糊解析，慢且可能错，建议给标准 ticker
+
+### 想出一份完整研究笔记（report，Word 输出）
+```bash
+fa report 2513.HK                          # vet 校验 + 自动路由框架 → report_<ticker>_<date>.docx
+fa report 2513.HK -i "我的逻辑..."          # 带自己的想法
+fa report GEV.US --framework leopold-bottleneck   # 强制指定框架，跳过路由
+fa report 2513.HK --framework general      # 强制用通用 12+3 维模板
+fa report --list                           # 看已注册的分析框架
+```
+
+- 笔记 = 第一部分逻辑校验（vet）+ 第二部分框架分析，落盘桌面 .docx
+- 路由只能选 `memory/framework/frameworks/` 里已存在的框架，把握不大自动回退通用 12+3 维模板
+- **加新框架 = 直接放一个 md 进 frameworks/**（frontmatter 写 name/title/description/applies/avoid），代码零改动；`_` 开头的文件视为草稿不参与路由
+- 框架要求但库内没有的数据（期权链/做空比例/机构持仓等）会标「待人工补查」并在文末汇总，不会编数字
+
+### 想要一份正式研究笔记（report → Word）
+```bash
+fa report 2513.HK                         # 三段式：逻辑校验 + 框架/9维材料分析 + 估值预期
+fa report 2513.HK --framework general     # 跳过路由，强制通用 9 维
+fa report --list                          # 看已注册的分析框架
+```
+
+三段结构：
+1. **逻辑校验**——vet 结果（CoT 命中/反逻辑/同业对比）
+2. **材料与框架分析**——命中专用框架（leopold/serenity/imacompnerd…）用框架；否则通用 9 维
+   （核心论点/业务结构/财务质地/行业地位/护城河/管理层/成长史/风险/竞争优势评级）
+3. **估值与预期分析（统一，不分框架）**——盈利预测/估值与目标价/催化剂/反证/跟踪指标/待人工补查清单；
+   数据自动拉 EODHD（历史利润表 + 卖方一致预期 + 目标价），缺的（分业务拆分等）进补查清单
+
+新框架往 `memory/framework/frameworks/` 扔 md 文件即可（frontmatter 写 name/title/applies/avoid）。
+
 ### 想多股比较选股
 ```bash
 fa cot vote T1 T2 T3 --sector "AI" --min-signal 8 --min-votes 3
 ```
 
 按你的 CoT 库给每只票打分，出持仓清单 ★/·/✗。
+
+### 对输出不满意，想让它学（点评沉淀）
+点评分三类，落点不同：
+- **内容错了**（某条逻辑不成立/漏了产业链）→ 改知识库：`fa chat` 里 edit_cot_chain 修链，或 `fa note` 补论点
+- **方法不对**（"反逻辑总是太泛""同业对比要带市占"这类每次都该改的）→ 写进
+  `memory/framework/review-rules.md` 的 `## 规则` 区，下次 vet/report 合成自动注入
+- **路由/召回错了** → 改框架 frontmatter 的 applies/avoid（`memory/framework/frameworks/`）或 sectors.yaml
+
+注意：一次性纠错不进 review-rules（只修当事 CoT/note）；规则攒到 ~30 条记得合并修剪。
 
 ### 想检查 agent 学到了什么
 ```bash

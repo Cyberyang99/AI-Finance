@@ -190,13 +190,31 @@ def main():
     pcot_si.add_argument("--dry-run", action="store_true", help="只统计缺 id 的链数，不写盘")
 
     # vet - 逻辑校验器（合成层：用 CoT+note 审一只股/一个想法）
-    pvet = sub.add_parser("vet", help="逻辑校验器：输入个股(+可选想法)，用已有 CoT+note 打分/补充/写反逻辑")
-    pvet.add_argument("ticker", help="标的代码，如 2513.HK")
+    pvet = sub.add_parser("vet", help="逻辑校验器：个股/纯观点/批量清单，用已有 CoT+note 打分/补充/写反逻辑")
+    pvet.add_argument("ticker", nargs="?", default="",
+                      help="标的代码，如 2513.HK（--batch 或纯观点模式可省略）")
     pvet.add_argument("-i", "--idea", default="",
-                      help="你的投资想法：内联文本，或 word/pdf/pptx/txt/md 文件路径(可选)")
+                      help="你的投资想法：内联文本，或 word/pdf/pptx/txt/md 文件路径；不带 ticker 时为观点-only 模式")
+    pvet.add_argument("--batch", default="",
+                      help="批量轻量扫描：xlsx/csv/txt 清单文件，或 '2513.HK,2015.HK' 内联清单 → 汇总 Excel")
+    pvet.add_argument("--top", type=int, default=5, help="批量模式每股命中 CoT 上限")
+    pvet.add_argument("--tag", default="",
+                      help="观点模式：按主题 tag 先过滤 CoT（闭合词表，fa sectors 查看）")
     pvet.add_argument("--cot-limit", type=int, default=15, help="召回 CoT 上限")
     pvet.add_argument("--note-limit", type=int, default=5, help="召回同业 note 上限")
     pvet.add_argument("--no-save", action="store_true", help="只打印不落盘")
+
+    # report - 个股研究笔记（vet + 框架路由 → Word）
+    prep = sub.add_parser("report", help="个股研究笔记：vet 校验 + 框架路由(12+3维保底) → Word")
+    prep.add_argument("tickers", nargs="*", help="一个或少量标的，如 2513.HK 2015.HK")
+    prep.add_argument("-i", "--idea", default="",
+                      help="你的投资想法：内联文本，或 word/pdf/pptx/txt/md 文件路径(可选)")
+    prep.add_argument("--framework", default="",
+                      help="强制指定框架 name（general=通用 12+3 维模板），跳过路由")
+    prep.add_argument("--list", action="store_true", help="列出已注册的分析框架")
+    prep.add_argument("--cot-limit", type=int, default=15, help="召回 CoT 上限")
+    prep.add_argument("--note-limit", type=int, default=5, help="召回同业 note 上限")
+    prep.add_argument("--no-save", action="store_true", help="只打印不落盘")
 
     # dashboard
     sub.add_parser("dash", help="仪表盘")
@@ -252,6 +270,8 @@ def main():
         _cmd_cot(args)
     elif args.cmd == "vet":
         _cmd_vet(args)
+    elif args.cmd == "report":
+        _cmd_report(args)
     elif args.cmd == "dash":
         _cmd_dash()
     elif args.cmd == "sectors":
@@ -1444,14 +1464,38 @@ def _cmd_cot_rescore(query: str, dry_run: bool = False):
 
 
 def _cmd_vet(args):
-    """逻辑校验器：用已有 CoT + note 审一只股 / 一个想法。"""
-    from .vet import vet_stock
+    """逻辑校验器：单股 / 观点-only / 批量清单。"""
+    if args.batch:
+        from .vet import parse_batch_input, vet_batch
 
-    res = vet_stock(
-        args.ticker, idea=args.idea,
-        cot_limit=args.cot_limit, note_limit=args.note_limit,
-        save=not args.no_save,
-    )
+        items, warns = parse_batch_input(args.batch)
+        for w in warns:
+            print(f"  [batch] {w}")
+        if not items:
+            print("[VET] ✗ 清单里没有可用标的")
+            return
+        res = vet_batch(items, top=args.top, save=not args.no_save)
+        ok = sum(1 for r in res["results"] if not r["error"])
+        tail = f" → {res['path']}" if res.get("path") else ""
+        print(f"\n[VET] 批量完成: {ok}/{len(res['results'])} 成功{tail}")
+        return
+
+    from .vet import vet_idea, vet_stock
+
+    if args.ticker:
+        res = vet_stock(
+            args.ticker, idea=args.idea,
+            cot_limit=args.cot_limit, note_limit=args.note_limit,
+            save=not args.no_save,
+        )
+    elif args.idea:
+        res = vet_idea(
+            args.idea, cot_limit=args.cot_limit, note_limit=args.note_limit,
+            tag=args.tag, save=not args.no_save,
+        )
+    else:
+        print("[VET] ✗ 至少给一个输入：ticker、-i 观点、或 --batch 清单")
+        return
     if res.get("error"):
         print(f"[VET] ✗ {res['error']}")
         return
@@ -1461,6 +1505,40 @@ def _cmd_vet(args):
     if res.get("path"):
         print(f"\n✓ 已落盘: {res['path']}")
         print("  （未入 note 库；看过满意可自行 fa note 收录）")
+
+
+def _cmd_report(args):
+    """个股研究笔记：vet + 框架路由(或 12+3 维保底) → Word。"""
+    if args.list:
+        from .framework import list_analysis_frameworks
+
+        fws = list_analysis_frameworks()
+        print(f"[REPORT] 已注册分析框架 {len(fws)} 个（+ general 保底）：")
+        for f in fws:
+            print(f"  · {f['name']} — {f['title']}")
+            print(f"    适用: {f['applies'][:60]}")
+        print("  · general — 通用 12+3 维研究模板（note_template 同源，路由不中时的保底）")
+        return
+
+    if not args.tickers:
+        print("[REPORT] ✗ 给至少一个标的（或 --list 看已注册框架）")
+        return
+    from .report import build_report
+
+    for tk in args.tickers:
+        res = build_report(tk, idea=args.idea, framework=args.framework,
+                           cot_limit=args.cot_limit, note_limit=args.note_limit,
+                           save=not args.no_save)
+        if res.get("error"):
+            print(f"[REPORT] ✗ {tk}: {res['error']}")
+            continue
+        if args.no_save:
+            print("\n" + "=" * 60)
+            print(res["markdown"])
+            print("=" * 60)
+        if res.get("path"):
+            print(f"\n✓ 已落盘: {res['path']}")
+            print("  （未入 note 库；满意可自行 fa note 收录核心结论）")
 
 
 def _cmd_dash():

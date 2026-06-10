@@ -256,6 +256,37 @@ DeepSeek v4 思考模式下，assistant content 含 `thinking` block。多轮 to
 - **存量 0 影响**。改动前的论点无 `recalled_note_ids`，迁移加的是 nullable 列；从下一次 `fa deep` 起才累积，跑过 deep + review 后 evolve 才出胜率表。
 > 边界：`set_thesis_recall` 空列表不写——避免重跑 deep（save_thesis 是 UPSERT）时把历史归因覆盖掉。
 
+## 五点十、进化闭环冻结 + 点评沉淀替代（2026-06-10）
+
+**审察结论**：项目两条腿——腿 A 知识合成（ingest→CoT/note→召回→vet/report），腿 B 预测进化（论点→回顾→Critic→Reflector→Evolver）。实际使用只走腿 A；腿 B 数据为零（论点 1 / 预测验证 0/4 / 情境笔记 2），而 Mem-Palace（情境笔记>100）和 GEPA（50+ review）的解锁数据只能由腿 B 生产 → 事实死亡。根因与"不做清单"拒绝 RL/LoRA 同一个：**市场反馈太稀疏**（一年几十个验证点、周期数月、归因噪声大），单人校准不出概率。四步愿景的第三步（盈利预测 Excel）、第四步（估值/赔率）用户同日取消，逻辑自洽。
+
+**替代方案：点评沉淀（review-rules）**。用户对每份 vet/report 输出的点评是**密集、即时、归因清晰**的反馈——正是腿 B 缺的燃料。机制：
+- 点评分三类、落点不同：内容错 → 改 CoT/note（已有 edit_cot_chain）；方法不对 → `memory/framework/review-rules.md`；路由/召回错 → 框架 applies/avoid、sectors.yaml（已有）
+- `framework.load_review_rules()` 只取 `## 规则` 之后正文，空/「（暂无」占位返回 ""；`inject_review_rules(system)` 拼到 vet_stock / vet_idea / vet_batch / report 四个合成 system 尾部
+- batch 在循环外算一次 system，不打破 DeepSeek 前缀缓存
+- **人审入库**：区分「一次性纠错」（不进规则）和「长期偏好」（才进），归类由人确认，合 [[fa-ux-fragility-preference]]
+- 天花板：规则 ~30 条要合并修剪（同 CoT merger 思路）；`fa feedback` 自动化（点评→分类→提议→确认）等规则攒到十几条、确认有效后再做（不过早造工具）
+
+**连带降级**：`fa deep` 保留当快速五维分析（预测注册尾巴无人回顾）；验证纪律冒烟从 `fa deep` 换成 `fa vet --no-save`。五点九的僵尸笔记功能随腿 B 一起冻结。唯一活着的 Tier 3 触发器：embedding 补充召回（见 二.9，链数 813 已过阈值，等"写过却没召回"的体感）。
+
+### ⚠️ 踩坑：港股中概的双币种 + EODHD 港股数据陷阱（2026-06-10）
+
+report 估值段被用户抓出数据错误，根因三个，全在 2513.HK 上实测坐实：
+1. **财报 CNY、交易 HKD**：EODHD `General.CurrencyCode` 是交易货币（HKD），财务报表另有
+   `Income_Statement.currency_symbol`（CNY）。直接拿 CurrencyCode 标利润表 = 全表标错币种，
+   混币算 PS/PE。修复：`fetch_forecast_pack` 读两个币种字段，不同则按 EODHD FOREX 实时汇率
+   （`fetch_fx_rate`，24h 缓存）**统一折算到上市地货币**并在数据块注明原币+汇率；折算失败保留原币+显式 ⚠。
+2. **EODHD 港股市值/目标价不可靠**：Highlights.MarketCapitalization（5858亿）vs 东财（5065亿）
+   vs 实时价×EODHD股本（2514亿）三者打架，分歧在股本口径；所谓 WallStreetTargetPrice（1136.9）
+   实为昨收价（1136.0）。修复：市值**以上市地行情源为准**（fund，港股=东财），两源分歧>15% 在
+   数据块显式预警；无评级分布（StrongBuy 等计数）的目标价直接丢弃。
+3. **裸大数进提示词**：快照原来打 `市值=506477750240`，LLM 易读错量级。修复：snapshot 统一
+   折成 `亿+币种`，浮点圆整 2 位。
+
+### ⚠️ 踩坑：靠正则事后剥 LLM 输出的章节不可靠（2026-06-10）
+
+report 嵌入 vet 结果时要删「## 待补充」尾节，最初用正则 `\n#{1,3} 待补充` 事后剥除——结果 LLM 输出成 `## 📌 待补充`（自己加了 emoji 装饰），正则没命中，整节漏进了交付的 Word。教训：**LLM 输出的标题/格式有装饰变异，事后正则匹配防不住；正确做法是从提示词源头不让它生成**（`SYNTH_TEMPLATE` 参数化 `{todo_section}`，`vet_stock(with_todo=False)` 时该节指令整体不进 prompt，并加一句「不要自行添加结构之外的章节」）。兜底正则保留但放宽为 `#{1,4}[^\n#]*待补充`（容忍装饰前缀），属第二道防线，不再是主依赖。
+
 ## 六、给未来 Claude 的建议
 
 1. **永远不要为"漂亮"重构记忆系统**。三层架构是有意的，不要合并。

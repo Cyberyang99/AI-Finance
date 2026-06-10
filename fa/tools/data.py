@@ -441,6 +441,118 @@ def _map_hk_sector(cn_label: str) -> str:
 
 
 # ── 公共 API ──
+def fetch_fx_rate(frm: str, to: str) -> Optional[float]:
+    """实时汇率（EODHD FOREX），24h 缓存。拿不到返回 None，调用方保持原币并明示。"""
+    if not frm or not to or frm == to:
+        return 1.0
+    pair = f"{frm.upper()}{to.upper()}"
+    cached = _cache_get(pair, "fx")
+    if cached:
+        return cached.get("rate")
+    try:
+        import json
+        import ssl
+        import urllib.request
+
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+        url = f"https://eodhd.com/api/real-time/{pair}.FOREX?api_token={_eodhd_key()}&fmt=json"
+        with urllib.request.urlopen(url, context=ctx, timeout=15) as r:
+            rate = _safe(json.load(r).get("close"))
+    except Exception as e:
+        print(f"  [FX] {pair}: {e}")
+        return None
+    if rate:
+        _cache_set(pair, "fx", {"rate": rate})
+    return rate
+
+
+def fetch_forecast_pack(ticker: str) -> Optional[dict]:
+    """拉「估值与预期分析」数据包：历史利润表序列 + 卖方一致预期 + 目标价/评级。
+
+    全市场统一走 EODHD 原始 payload——A股/港股也有 Trend 一致预期（覆盖深浅不一），
+    目标价/评级基本只有美股。历史与预期都拿不到时返回 None，调用方标「待人工补查」。
+    与 fetch_fundamentals 分开缓存（fcast 前缀）：那边只留比率，这边要原始序列。
+    """
+    cached = _cache_get(ticker, "fcast")
+    if cached:
+        return cached
+    try:
+        from eodhd import APIClient
+        api = APIClient(_eodhd_key())
+        data = api.get_fundamentals_data(ticker)
+    except Exception as e:
+        print(f"  [EODHD fcast] {ticker}: {e}")
+        return None
+    if not data or not isinstance(data, dict):
+        return None
+
+    inc_y = data.get("Financials", {}).get("Income_Statement", {}).get("yearly", {})
+    hist = []
+    for d in sorted(inc_y.keys())[-6:]:
+        r = inc_y[d] or {}
+        hist.append({
+            "date": d,
+            "revenue": _safe(r.get("totalRevenue")),
+            "gross_profit": _safe(r.get("grossProfit")),
+            "operating_income": _safe(r.get("operatingIncome")),
+            "net_income": _safe(r.get("netIncome")),
+        })
+
+    trend = []
+    for d, t in sorted((data.get("Earnings", {}).get("Trend", {}) or {}).items(), reverse=True):
+        rev = _safe((t or {}).get("revenueEstimateAvg"))
+        eps = _safe((t or {}).get("earningsEstimateAvg"))
+        if not rev and eps is None:  # 全空或收入=0 的占位行（多为季度噪声）
+            continue
+        trend.append({
+            "period": d, "revenue_avg": rev, "eps_avg": eps,
+            "analysts": _safe(t.get("revenueEstimateNumberOfAnalysts")),
+        })
+        if len(trend) >= 6:
+            break
+
+    # 单位统一到上市地货币：港股中概常见「财报 CNY、交易 HKD」，混币会算错 PS/PE
+    trade_cur = (data.get("General", {}) or {}).get("CurrencyCode") or ""
+    fin_cur = (data.get("Financials", {}).get("Income_Statement", {}) or {}).get("currency_symbol") or trade_cur
+    fx = fetch_fx_rate(fin_cur, trade_cur) if (fin_cur and trade_cur and fin_cur != trade_cur) else 1.0
+    if fx and fx != 1.0:
+        for h in hist:
+            for k in ("revenue", "gross_profit", "operating_income", "net_income"):
+                if h[k] is not None:
+                    h[k] = h[k] * fx
+        for t in trend:
+            if t["revenue_avg"] is not None:
+                t["revenue_avg"] = t["revenue_avg"] * fx
+            if t["eps_avg"] is not None:
+                t["eps_avg"] = round(t["eps_avg"] * fx, 4)
+
+    ar = data.get("AnalystRatings", {}) or {}
+    hl = data.get("Highlights", {}) or {}
+    val = data.get("Valuation", {}) or {}
+    rating = {k: ar.get(k) for k in ("Rating", "StrongBuy", "Buy", "Hold", "Sell", "StrongSell")
+              if ar.get(k) is not None}
+    # 无评级分布的"目标价"不可信（实测 2513.HK 的 WallStreetTargetPrice 就是昨收价），丢弃
+    target = (_safe(ar.get("TargetPrice")) or _safe(hl.get("WallStreetTargetPrice"))) if rating else None
+    pack = {
+        "ticker": ticker,
+        "income_hist": hist,
+        "est_trend": trend,
+        "target_price": target,
+        "rating": rating,
+        "forward_pe": _safe(val.get("ForwardPE")),
+        "market_cap": _safe(hl.get("MarketCapitalization")),
+        "currency": trade_cur,
+        "fin_currency": fin_cur,
+        "fx_rate": fx,
+        "converted": bool(fx and fx != 1.0),
+    }
+    if not hist and not trend:
+        return None
+    _cache_set(ticker, "fcast", pack)
+    return pack
+
+
 def fetch_fundamentals(ticker: str, market: str = "auto", with_benchmarks: bool = True) -> Optional[dict]:
     """拉取单只股票基本面数据，可选注入行业基准。"""
     if ticker.endswith(".HK"):

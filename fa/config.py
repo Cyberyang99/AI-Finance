@@ -74,7 +74,8 @@ def make_anthropic_client():
     设置 ANTHROPIC_USE_AUTH_TOKEN=1 时改走 Bearer (auth_token)。
     """
     import anthropic
-    kwargs = {}
+    # DeepSeek 网关偶发瞬断；report 是 5 连环调用，一跳失败全程白跑，重试给足
+    kwargs = {"max_retries": 4}
     if ANTHROPIC_BASE_URL:
         kwargs["base_url"] = ANTHROPIC_BASE_URL
     if USE_AUTH_TOKEN:
