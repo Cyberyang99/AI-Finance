@@ -696,17 +696,22 @@ def _ingest_one(fpath, ticker, sector, with_cot=True, force=False, user_comment=
             old_cot.unlink()
             print(f"  ↺ --force: 删除旧 CoT 文件 {old_cot.name}")
 
-    # 自动分类：用户没指定 --sector 时，调 LLM 从 sectors.yaml 挑
+    # 自动分类：始终调 LLM 拿主题 tags；用户指定 --sector 时只覆盖主板块，不丢 tags。
     final_sector = sector
     auto_tags = []
-    if not final_sector and auto_classify and with_cot:
+    if auto_classify and with_cot:
         from .sectors import classify_doc, display_sector
         print(f"  [LLM] 自动分类中...")
         cls = classify_doc(doc["filename"], doc["text"], user_comment=user_comment)
-        final_sector = cls["sector_id"]
+        if not final_sector:
+            final_sector = cls["sector_id"]
         auto_tags = cls.get("tags") or []
-        print(f"  ✓ 分类: {display_sector(final_sector)} "
-              f"(置信度 {cls.get('confidence', '?')}) tags={auto_tags or '(无)'}")
+        if sector:
+            print(f"  ✓ 分类: sector={display_sector(final_sector)} (用户指定，LLM 建议 {display_sector(cls['sector_id'])}) "
+                  f"tags={auto_tags or '(无)'}")
+        else:
+            print(f"  ✓ 分类: {display_sector(final_sector)} "
+                  f"(置信度 {cls.get('confidence', '?')}) tags={auto_tags or '(无)'}")
         if cls.get("suggested_tags"):
             print(f"  ⚠ 疑似新主题未归类: {cls['suggested_tags']} — 未自动建 tag。"
                   f"如确需，请加入 memory/sectors.yaml 后重抽")
@@ -735,8 +740,16 @@ def _ingest_one(fpath, ticker, sector, with_cot=True, force=False, user_comment=
                 cots, doc_context=f"{doc['filename']} / {final_sector or ''}",
                 user_comment=user_comment,
             )
+            doc_level_tags = list(auto_tags)
             union, _seen = [], set()
+            inherited_tags = 0
+            untagged_after = 0
             for c, tg in zip(cots, ch["chain_tags"]):
+                if not tg and doc_level_tags:
+                    tg = doc_level_tags[:2]
+                    inherited_tags += 1
+                if not tg:
+                    untagged_after += 1
                 c["tags"] = tg
                 for t in tg:
                     if t not in _seen:
@@ -744,6 +757,10 @@ def _ingest_one(fpath, ticker, sector, with_cot=True, force=False, user_comment=
                         union.append(t)
             if union:
                 auto_tags = union  # 用链级并集作为 frontmatter tags
+            if inherited_tags:
+                print(f"  ℹ {inherited_tags} 条链未命中细分主题，已继承文档级 tags 作为召回兜底")
+            if untagged_after:
+                print(f"  ℹ {untagged_after} 条链仍未打主题（闭合词表套不上，保留待人工策展）")
             if ch.get("suggested_tags"):
                 print(f"  ⚠ 链级疑似新主题未归类: {ch['suggested_tags']} — 未自动建 tag")
             cot_path = save_cot_file(

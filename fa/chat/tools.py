@@ -279,8 +279,18 @@ def _do_ingest_doc(args: dict, state: dict) -> str:
     from ..sectors import classify_chains
     ch = classify_chains(cots, doc_context=f"{doc['filename']} / {sector_id or ''}",
                          user_comment=comment)
+    doc_level_tags = list(tags)
     _union, _seen = [], set()
+    inherited_tags = 0
+    untagged_after = 0
     for c, tg in zip(cots, ch["chain_tags"]):
+        if not tg and doc_level_tags:
+            # 链级分类器保守时，用文档级 tag 做兜底，避免同一文件里少数空链变成不可召回。
+            # 仍然只继承闭合词表内已接受的 tag，不引入 LLM 新造主题。
+            tg = doc_level_tags[:2]
+            inherited_tags += 1
+        if not tg:
+            untagged_after += 1
         c["tags"] = tg
         for t in tg:
             if t not in _seen:
@@ -288,6 +298,10 @@ def _do_ingest_doc(args: dict, state: dict) -> str:
                 _union.append(t)
     if _union:
         tags = _union
+    if inherited_tags:
+        print(f"           ℹ {inherited_tags} 条链未命中细分主题，已继承文档级 tags 作为召回兜底")
+    if untagged_after:
+        print(f"           ℹ {untagged_after} 条链仍未打主题（闭合词表套不上，保留待人工策展）")
     if ch.get("suggested_tags"):
         print(f"           ⚠ 链级疑似新主题未归类: {ch['suggested_tags']} — 未自动建 tag")
 
@@ -531,9 +545,15 @@ def _do_list_cot(args: dict, state: dict) -> str:
     # 排序：默认按 signal 降序；sort=asc 升序（"看分数最低的"一步到位）
     asc = (args.get("sort") or "desc").lower() == "asc"
     cots.sort(key=lambda c: int(c.get("signal", 0) or 0), reverse=not asc)
-    cap = 8 if full else 15
+    try:
+        requested_limit = int(args.get("limit") or 0)
+    except (TypeError, ValueError):
+        requested_limit = 0
+    cap_default = 5 if full else 10
+    cap_max = 8 if full else 20
+    cap = max(1, min(requested_limit or cap_default, cap_max))
     order_hint = "分数低→高" if asc else "分数高→低"
-    lines = [f"=== CoT 列表 ({len(cots)} 条，{order_hint}{('，完整推理' if full else '')}) ==="]
+    lines = [f"=== CoT 简表 ({len(cots)} 条，显示 {min(cap, len(cots))} 条，{order_hint}{('，完整推理' if full else '')}) ==="]
     for c in cots[:cap]:
         tags = c.get("_tags") or []
         theme = "、".join(tags) if tags else "(未打主题)"
@@ -546,12 +566,10 @@ def _do_list_cot(args: dict, state: dict) -> str:
             lines.append(f"  主题={theme} · 行业={c['_sector']} · 来源={c.get('_source','?')} · id={cid}")
             lines.append(f"  {c.get('COT','').strip()}")
         else:
-            lines.append(f"  [{c['signal']}/10] {c['trigger']}")
-            lines.append(f"    主题={theme}  ·  id={cid}")
+            lines.append(f"  [{c['signal']}/10] {c['trigger']} | 主题={theme} | id={cid}")
     if len(cots) > cap:
-        lines.append(f"\n... 还有 {len(cots) - cap} 条（提高 min_signal / 加 keyword / 翻看，"
-                     f"或加 full=true 看完整推理）")
-    lines.append("（要改/删某条：用它的 id 调 edit_cot_chain）")
+        lines.append(f"\n... 还有 {len(cots) - cap} 条（加 keyword/min_signal 缩小范围；要全文再设 full=true）")
+    lines.append("（要改/删某条，用 id 调 edit_cot_chain；默认只给简表）")
     return "\n".join(lines)
 
 
@@ -668,7 +686,7 @@ TOOLS_SPEC = [
         "name": "list_cot",
         "description": ("列出已提炼的思维链 CoT。按主题 (tag) 或主板块 (sector) 过滤；tag 是跨板块召回主轴。"
                         "**tag 用模糊词即可**（'AI大模型'/'大模型' 自动解析到 'AI 大模型与云'，空格/拼写不敏感），"
-                        "不用先查全称、不用反复试。看某主题完整推理传 full=true（一次返回全文，别逐条 get_cot）；"
+                        "不用先查全称、不用反复试。默认只返回简表；用户明确要完整推理时才传 full=true；"
                         "看分数最低的传 sort=asc。每条带 id，可据此 edit_cot_chain 改/删。"),
         "input_schema": {
             "type": "object",
@@ -678,7 +696,8 @@ TOOLS_SPEC = [
                 "min_signal": {"type": "integer", "description": "信号强度下限 1-10"},
                 "keyword": {"type": "string", "description": "在 trigger+正文里再做关键词过滤（可选）"},
                 "sort": {"type": "string", "enum": ["desc", "asc"], "description": "按 signal 排序，desc=高到低(默认)，asc=低到高（看最低分用 asc）"},
-                "full": {"type": "boolean", "description": "true 则输出每条的完整推理链 + 子分（最多 8 条），否则只列标题（最多 15 条）"}
+                "full": {"type": "boolean", "description": "true 则输出每条的完整推理链 + 子分（最多 8 条），否则只列简表（默认 10 条）"},
+                "limit": {"type": "integer", "description": "返回条数。简表默认 10、最高 20；full 默认 5、最高 8"}
             },
             "required": []
         },
@@ -751,6 +770,27 @@ TOOLS_SPEC = [
                 "ticker": {"type": "string", "description": "股票代码或公司名，可空（默认最近 ticker）"},
                 "date": {"type": "string", "description": "YYYY-MM-DD，取该日期的历史笔记全文（可选）"},
                 "all": {"type": "boolean", "description": "true 时返回全部笔记（新→旧），用于看观点演变（可选）"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "query_knowledge",
+        "description": ("万能知识库查询：跨 CoT + note 搜索、按 ticker/tag/sector 过滤，返回全文；"
+                        "命中很多或用户说『导出/Word/保存到桌面』时传 export_docx=true。"
+                        "适合用户问『把关于 X 的知识库内容都找出来』『全量显示/导出』。"),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "关键词，空则按其它过滤条件查全量"},
+                "scope": {"type": "string", "enum": ["all", "cot", "note"], "description": "默认 all"},
+                "ticker": {"type": "string", "description": "公司名或 ticker，可选"},
+                "tag": {"type": "string", "description": "主题 tag，可模糊，如 AI算力/大模型"},
+                "sector": {"type": "string", "description": "主板块，可选"},
+                "min_signal": {"type": "integer", "description": "CoT 信号分下限，默认 0"},
+                "max_items": {"type": "integer", "description": "最多展示/导出的条数，默认 20，最高 200"},
+                "full": {"type": "boolean", "description": "true 返回全文，false 只返回简表；默认 true"},
+                "export_docx": {"type": "boolean", "description": "true 导出 Word 到桌面"}
             },
             "required": [],
         },
@@ -975,6 +1015,25 @@ def _do_get_note(args: dict, state: dict) -> str:
     return f"{head}\n{_body(latest)}"
 
 
+def _do_query_knowledge(args: dict, state: dict) -> str:
+    from .knowledge import query_knowledge
+    res = query_knowledge(
+        query=args.get("query") or "",
+        scope=args.get("scope") or "all",
+        ticker=args.get("ticker") or "",
+        tag=args.get("tag") or "",
+        sector=args.get("sector") or "",
+        min_signal=int(args.get("min_signal") or 0),
+        max_items=int(args.get("max_items") or 20),
+        full=bool(args.get("full", True)),
+        export_docx=bool(args.get("export_docx")),
+    )
+    out = res["text"]
+    if res.get("docx_path"):
+        out += f"\n\n✓ Word 已导出到桌面: {res['docx_path']}"
+    return out
+
+
 # ── Block 4: 修改 / 合并 / 软删除 ──
 
 def _do_merge_cot(args: dict, state: dict) -> str:
@@ -1124,6 +1183,7 @@ HANDLERS: dict[str, Callable[[dict, dict], str]] = {
     "search_memory": _do_search_memory,
     "get_cot": _do_get_cot,
     "get_note": _do_get_note,
+    "query_knowledge": _do_query_knowledge,
     "merge_cot": _do_merge_cot,
     "regroup_cot": _do_regroup_cot,
     "rescore_cot": _do_rescore_cot,
