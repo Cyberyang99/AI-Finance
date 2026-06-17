@@ -91,26 +91,24 @@ fa consolidate 2513.HK --no-save     # 打印综合稿，不落盘
 - `fa vet` 会优先读取 company synthesis；若有 synthesis，只补最近 5 份 report-level notes，避免多报告重复刷屏。
 - `fa chat` 启动时会自动检查最近 30 天新增/更新且 note>=2 的标的，最多自动综合 3 个；可用 `FA_CHAT_AUTO_CONSOLIDATE=0` 关闭。
 
-### 批量下载研报并投喂 FA
+### 批量筛查研报
 ```bash
 python3 ~/.claude/skills/research-ingest/scripts/research_ingest.py \
   --stock 600519,300750 \
   --start 2026-01-01 \
-  --limit 5 \
-  --comment "批量研报入库"
+  --limit 20
 
 python3 ~/.claude/skills/research-ingest/scripts/research_ingest.py \
   --report-type industry \
   --keyword 光模块 \
   --start 2026-01-01 \
-  --limit 10 \
-  --sector "AI 互联"
+  --limit 10
 ```
 
-- 个股报告：下载 PDF → `fa note -f` → 自动 `fa consolidate`。
-- 行业/策略/宏观：下载 PDF → `fa ingest` 抽 CoT。
-- Wind DB 个股研报没有 PDF/URL 字段，且 `content` 通常为空；这种情况下脚本会导出 DB 摘要 Markdown，状态标为 `text_from_db_abstract`，不要当原文研报使用。
-- 每次输出 `manifest.jsonl` 和 `run_summary.json` 到桌面时间戳目录。
+- 这个技能现在只做报告筛查，不自动 `fa note/fa ingest/fa consolidate`。
+- Wind DB 个股研报没有 PDF/URL 字段，且 `content` 通常为空；脚本会导出 DB 摘要 Markdown，状态标为 `text_from_db_abstract`，不要当原文研报使用。
+- 每次输出 `manifest.jsonl`、`run_summary.json`、`report_screen.md` 到桌面时间戳目录。
+- 外部源有 `pdf_link` 时，显式加 `--download-pdf` 才下载 PDF；拿到原文后再人工决定是否 `fa note -f` 或 `fa ingest`。
 
 ### 想查公司公告（治理/基本面变化）
 ```bash

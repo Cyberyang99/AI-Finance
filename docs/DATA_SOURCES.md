@@ -102,6 +102,6 @@ A 股：
 
 ## 使用取舍
 
-- 研报下载技能仍保留：外部源有 PDF 时继续用于批量下载和 `fa note/fa ingest`；Wind DB 无 PDF 时只能导出摘要 Markdown。
+- `report-screen` 技能只做研报筛查：外部源有 PDF 时可显式下载，Wind DB 无 PDF 时只导出摘要 Markdown；不要把 Wind 摘要自动写进 `fa note/fa ingest`。
 - 公告适合补三表之外的信息：治理变化、减持增持、回购、质押、处罚诉讼、重大合同、订单、产能、募投、并购、业绩预告。
 - `fa vet/report` 里不要默认塞全量公告。更合理的顺序是：用户问到具体标的/治理/基本面变化时，chat 先查公告；确认重要后再手动 `fa note` 固化成长期 note。
