@@ -77,6 +77,7 @@ fa vet --batch 名单.txt                    # 每行一个标的，后面可跟
 - 单股/观点输出 markdown 到桌面；批量输出 `vet_batch_<时间>.xlsx` 到桌面
 - 批量是轻量版：每股 1 次 LLM 调用，CoT 目录放 prompt 前缀吃 DeepSeek 自动缓存
 - 清单里无后缀的输入（公司名/裸代码）走模糊解析，慢且可能错，建议给标准 ticker
+- `fa chat` 里的快捷键 3 同时放 vet 和公告核查；公告是个股研究前的证据源，不单独列主菜单。
 
 ### 同一家公司有多份报告，想生成当前综合观点
 ```bash
@@ -89,7 +90,7 @@ fa consolidate 2513.HK --no-save     # 打印综合稿，不落盘
 - 综合稿写到 `memory/theses/company/`，冲突/过时信息写到 `memory/theses/conflicts/`。
 - 盈利预测、估值、风险若冲突，保留分歧和来源，不直接平均。
 - `fa vet` 会优先读取 company synthesis；若有 synthesis，只补最近 5 份 report-level notes，避免多报告重复刷屏。
-- `fa chat` 启动时会自动检查最近 30 天新增/更新且 note>=2 的标的，最多自动综合 3 个；可用 `FA_CHAT_AUTO_CONSOLIDATE=0` 关闭。
+- `fa chat` 快捷键 5 的维护工具箱里可以手动检查/生成 company synthesis；启动页不自动跑，避免干扰高频入口。
 
 ### 批量筛查研报
 ```bash

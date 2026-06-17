@@ -334,8 +334,8 @@ HELP_TEXT = """\
   /tmp/茅台研报.pdf 给 600519 写笔记，重点产能稀缺
 
 快捷入口（引导式，不靠 LLM 猜意图）：
-  1 / 2 / 3 / 4  投喂研报→CoT / 录入 note / vet 三模式 / 知识库查询+Word导出
-  5             维护工具箱（未分类、主题、清理）
+  1 / 2 / 3 / 4  投喂研报→CoT / 录入 note / vet+公告核查 / 知识库查询+Word导出
+  5             维护工具箱（company synthesis、未分类、主题、清理）
   m             调出快捷菜单
   /cot <路径>   直接上传研报提炼 CoT
   /vet <代码> [想法]  直接校验个股逻辑
@@ -393,10 +393,10 @@ def _quick_menu_text() -> str:
 │
 │ [1] 投喂研报 -> 提炼 CoT
 │ [2] 录入 / 上传 note
-│ [3] vet 校验 -> 个股 / 想法 / 批量
+│ [3] vet / 公告核查 -> 个股 / 想法 / 批量 / 公告
 │ [4] 知识库查询 -> 一句话搜 CoT + note / Word 导出
 │
-│ [5] 维护工具箱（低频：未分类、主题、清理）
+│ [5] 维护工具箱（低频：company synthesis、未分类、主题、清理）
 │ 直接说话 = 自由对话 · m = 菜单 · /help = 全部命令 · /quit = 退出
 └──────────────────────────────────────────────────────"""
 
@@ -502,7 +502,7 @@ def _read_user_input() -> str:
 
 def _quick_action(choice: str, state: dict) -> None:
     """数字快捷 → 引导式确定性流程（不经 LLM 路由，消除上传歧义）。"""
-    from .tools import _do_ingest_doc, _do_add_note, _do_list_notes
+    from .tools import _do_ingest_doc, _do_add_note, _do_list_announcements
 
     if choice == "1":
         print("  [上传研报 → 提炼 CoT]")
@@ -530,8 +530,8 @@ def _quick_action(choice: str, state: dict) -> None:
             print(_do_add_note({"ticker": ticker, "message": msg}, state))
 
     elif choice == "3":
-        print("  [vet 校验]")
-        mode = _ask("  模式 [1] 个股  [2] 纯想法  [3] 批量清单  (回车=1): ") or "1"
+        print("  [vet / 公告核查]")
+        mode = _ask("  模式 [1] 个股vet  [2] 纯想法vet  [3] 批量清单  [4] 公告核查  (回车=1): ") or "1"
         from ..vet import vet_stock, vet_idea, parse_batch_input, vet_batch
         if mode == "1":
             ticker = _ask("  股票代码 / 公司名: ")
@@ -583,6 +583,24 @@ def _quick_action(choice: str, state: dict) -> None:
                 print(f"    {r.get('ticker')}  契合度={score if score is not None else '?'}  {r.get('verdict', '')[:60]}")
             if len(res.get("results", [])) > 8:
                 print(f"    ... 还有 {len(res['results']) - 8} 只，详见 Excel")
+        elif mode == "4":
+            ticker = _ask("  A股代码 / 公司名: ")
+            if not ticker:
+                return
+            focus = _ask("  关注 [1] 治理/减持增持/质押/处罚  [2] 基本面/业绩/订单/产能  [3] 自定义关键词  (回车=1): ") or "1"
+            args = {"ticker": ticker, "limit": 12, "show_text": False}
+            if focus == "2":
+                args["focus"] = "fundamental"
+            elif focus == "3":
+                kw = _ask("  关键词: ") or ""
+                args["keyword"] = kw
+                show = _ask("  是否展示正文/PDF摘录？[y/N]: ") or "n"
+                args["show_text"] = show.lower() in ("y", "yes", "是")
+            else:
+                args["focus"] = "governance"
+            start = _ask("  开始日期 YYYY-MM-DD (默认 2025-01-01): ") or "2025-01-01"
+            args["start"] = start
+            print(_do_list_announcements(args, state))
         else:
             print("  → 无效模式，已取消")
 
@@ -614,8 +632,25 @@ def _quick_action(choice: str, state: dict) -> None:
 
     elif choice == "5":
         print("  [维护工具箱]")
-        print(_memory_overview())
-        print("  可直接说：查看未分类 CoT / 把某份 CoT 改主题 / 合并某板块 CoT / 重打分某份 CoT")
+        mode = _ask("  维护项 [1] 记忆概览  [2] company synthesis  [3] 其他维护提示  (回车=1): ") or "1"
+        if mode == "2":
+            ticker = _ask("  股票代码/公司名 (可空；空=检查最近需要综合的标的): ") or ""
+            if ticker:
+                from ..consolidate import build_company_synthesis
+                r = build_company_synthesis(ticker, save=True)
+                if r.get("error"):
+                    print(f"  ✗ {r['error']}")
+                else:
+                    print(f"  ✓ 综合稿: {r['path']}")
+                    print(f"  ✓ 冲突清单: {r['conflict_path']}")
+            else:
+                r = _company_synthesis_homepage()
+                print(_render_synthesis_homepage(r))
+        elif mode == "3":
+            print("  可直接说：查看未分类 CoT / 把某份 CoT 改主题 / 合并某板块 CoT / 重打分某份 CoT")
+            print("  company synthesis 也可用 /consolidate [代码] 手动运行。")
+        else:
+            print(_memory_overview())
 
 
 # ── 上传意图询问（问题3：路径+无明确意图 → 先问 CoT/note/both，减少误操作）──
@@ -698,10 +733,6 @@ def run_repl(model: str | None = None, max_iterations: int | None = None):
     session_file = SESSION_DIR / f"session_{datetime.now():%Y%m%d-%H%M%S}.json"
 
     _banner(model, mem_overview)
-    synth_home = _company_synthesis_homepage()
-    print("\n" + _render_synthesis_homepage(synth_home))
-    if synth_home.get("results"):
-        mem_overview = _memory_overview()
     print("\n" + _quick_menu_text())
 
     while True:
