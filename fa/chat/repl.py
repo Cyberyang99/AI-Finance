@@ -339,6 +339,7 @@ HELP_TEXT = """\
   m             调出快捷菜单
   /cot <路径>   直接上传研报提炼 CoT
   /vet <代码> [想法]  直接校验个股逻辑
+  /consolidate [代码]  手动生成 company synthesis；不带代码则跑首页维护
 
 特殊命令：
   /reset        清空对话历史和状态
@@ -398,6 +399,51 @@ def _quick_menu_text() -> str:
 │ [5] 维护工具箱（低频：未分类、主题、清理）
 │ 直接说话 = 自由对话 · m = 菜单 · /help = 全部命令 · /quit = 退出
 └──────────────────────────────────────────────────────"""
+
+
+def _company_synthesis_homepage() -> dict:
+    """fa chat 首页维护：自动综合最近新增/更新且 note>=2 的个股。"""
+    try:
+        from ..consolidate import stale_synthesis_candidates, auto_consolidate_stale
+    except Exception as e:
+        return {"error": f"加载 consolidate 失败: {e}"}
+
+    try:
+        limit = int(os.environ.get("FA_CHAT_AUTO_CONSOLIDATE_LIMIT", "3"))
+    except ValueError:
+        limit = 3
+    try:
+        recent_days = int(os.environ.get("FA_CHAT_AUTO_CONSOLIDATE_DAYS", "30"))
+    except ValueError:
+        recent_days = 30
+    if os.environ.get("FA_CHAT_AUTO_CONSOLIDATE", "1").lower() in ("0", "false", "no"):
+        return {"skipped": "FA_CHAT_AUTO_CONSOLIDATE=0"}
+
+    candidates = stale_synthesis_candidates(min_notes=2, recent_days=recent_days, limit=limit)
+    if not candidates:
+        return {"candidates": [], "results": [], "recent_days": recent_days, "limit": limit}
+
+    print(f"\n[首页维护] 发现 {len(candidates)} 个需要更新 company synthesis 的标的，开始自动综合...")
+    for c in candidates:
+        print(f"  - {c['ticker']}：{c['note_count']} 份 note")
+    return auto_consolidate_stale(min_notes=2, recent_days=recent_days, limit=limit)
+
+
+def _render_synthesis_homepage(result: dict) -> str:
+    if result.get("error"):
+        return f"company synthesis 首页维护失败：{result['error']}"
+    if result.get("skipped"):
+        return f"company synthesis 首页维护已跳过：{result['skipped']}"
+    candidates = result.get("candidates") or []
+    if not candidates:
+        return "company synthesis：没有需要更新的标的（条件：最近新增/更新 note，且 note>=2）。"
+    lines = ["company synthesis 首页维护："]
+    for r in result.get("results", []):
+        if r.get("ok"):
+            lines.append(f"- {r['ticker']}：已更新 {Path(r['path']).name}（notes={r['note_count']}）")
+        else:
+            lines.append(f"- {r['ticker']}：失败（{r.get('error', 'unknown')}）")
+    return "\n".join(lines)
 
 
 def _ask(prompt: str):
@@ -652,6 +698,10 @@ def run_repl(model: str | None = None, max_iterations: int | None = None):
     session_file = SESSION_DIR / f"session_{datetime.now():%Y%m%d-%H%M%S}.json"
 
     _banner(model, mem_overview)
+    synth_home = _company_synthesis_homepage()
+    print("\n" + _render_synthesis_homepage(synth_home))
+    if synth_home.get("results"):
+        mem_overview = _memory_overview()
     print("\n" + _quick_menu_text())
 
     while True:
@@ -782,6 +832,22 @@ def run_repl(model: str | None = None, max_iterations: int | None = None):
                     _say_assistant(r["markdown"])
                     if r.get("path"):
                         print(f"\n  ✓ 已落盘: {r['path']}（未入库）")
+            continue
+        if user_input.startswith("/consolidate"):
+            rest = user_input[len("/consolidate"):].strip()
+            if rest:
+                from ..consolidate import build_company_synthesis
+                r = build_company_synthesis(rest, save=True)
+                if r.get("error"):
+                    print(f"  ✗ {r['error']}")
+                else:
+                    print(f"  ✓ 综合稿: {r['path']}")
+                    print(f"  ✓ 冲突清单: {r['conflict_path']}")
+            else:
+                r = _company_synthesis_homepage()
+                print(_render_synthesis_homepage(r))
+                if r.get("results"):
+                    mem_overview = _memory_overview()
             continue
 
         # 上传意图询问：给了文件路径但没说要 CoT/note → 先问再做（不静默默认）

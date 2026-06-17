@@ -27,6 +27,7 @@ USER_THESES_DIR = PROJECT_DIR / "memory" / "theses" / "user"
 # note 专属原文归档（独立于 CoT 的 memory/raw/）；放 user/ 下随 OneDrive 同步，
 # load_user_notes 用非递归 glob("*.md") 不会扫到这里。
 NOTE_RAW_DIR = USER_THESES_DIR / "_raw"
+NOTE_TEXT_DIR = NOTE_RAW_DIR / "text"
 
 
 def archive_note_raw(src_path, file_hash_val: str) -> str:
@@ -42,6 +43,21 @@ def archive_note_raw(src_path, file_hash_val: str) -> str:
     if not dest.exists():
         shutil.copy2(src, dest)
     return f"_raw/{dest.name}"
+
+
+def archive_note_text(doc_text: str, file_hash_val: str, source_name: str) -> str:
+    """把已抽取纯文本归档到 theses/user/_raw/text/<hash>_<name>.txt。
+
+    原始 PDF/PPT/DOCX 负责可重跑抽取；纯文本负责快速审计和定位原文片段。
+    """
+    if not doc_text or not doc_text.strip():
+        return ""
+    NOTE_TEXT_DIR.mkdir(parents=True, exist_ok=True)
+    safe_name = re.sub(r"[\\/:*?\"<>|]", "_", Path(source_name).stem)[:80] or "source"
+    dest = NOTE_TEXT_DIR / f"{file_hash_val}_{safe_name}.txt"
+    if not dest.exists():
+        dest.write_text(doc_text, encoding="utf-8")
+    return f"_raw/text/{dest.name}"
 
 DIMENSIONS = [
     ("core_thesis", "核心论点（为什么看好/看坏，一两句话）"),
@@ -398,7 +414,7 @@ def retag_all_notes(force: bool = False) -> dict:
     if not USER_THESES_DIR.exists():
         return stats
     for p in sorted(USER_THESES_DIR.glob("*.md")):
-        if not re.match(r"^(.+?)_(\d{4}-\d{2}-\d{2})\.md$", p.name):
+        if not re.match(r"^(.+?)_(\d{4}-\d{2}-\d{2})(?:_.+)?\.md$", p.name):
             continue
         try:
             text = p.read_text(encoding="utf-8")
@@ -440,7 +456,7 @@ def load_user_notes(ticker: Optional[str] = None) -> list[dict]:
     out = []
     for p in USER_THESES_DIR.glob("*.md"):
         # 文件名格式 <TICKER>_<YYYY-MM-DD>.md
-        m = re.match(r"^(.+?)_(\d{4}-\d{2}-\d{2})\.md$", p.name)
+        m = re.match(r"^(.+?)_(\d{4}-\d{2}-\d{2})(?:_.+)?\.md$", p.name)
         if not m:
             continue
         t, d = m.group(1), m.group(2)
@@ -459,7 +475,11 @@ def load_user_notes(ticker: Optional[str] = None) -> list[dict]:
             "sector": fm.get("sector", ""),
             "tags": _parse_tags(fm.get("tags", "")),
             "raw_path": fm.get("raw_path", ""),
+            "raw_text_path": fm.get("raw_text_path", ""),
+            "source_hash": fm.get("source_hash", ""),
             "source_doc": fm.get("source_doc", ""),
+            "template_version": fm.get("template_version", ""),
+            "note_schema": fm.get("note_schema", ""),
         })
     out.sort(key=lambda x: x["created_at"], reverse=True)
     return out
@@ -496,7 +516,7 @@ def soft_delete_note(ticker: str, note_date: Optional[str] = None) -> dict:
     return {"ticker": t, "archived": archived}
 
 
-# ── 12 维度 note 保存（新模板） ──
+# ── canonical_15d_v1 note 保存（新模板） ──
 
 def save_note_12d(
     ticker: str,
@@ -507,12 +527,14 @@ def save_note_12d(
     user_comment: str = "",
     source_doc: str = "",
     raw_path: str = "",
+    raw_text_path: str = "",
+    source_hash: str = "",
     source: str = "user",
     weight: float = 2.0,
     confidence: str = "high",
     filename_suffix: str = "",
 ) -> Path:
-    """保存 12 维度结构化 note 到 memory/theses/user/<ticker>_<date>[_<suffix>].md.
+    """保存 canonical_15d_v1 结构化 note 到 memory/theses/user/<ticker>_<date>[_<suffix>].md.
 
     payload: {dim_id -> 内容}，参考 fa.note_template.empty_payload()
     sector/tags: 从关联 CoT 继承或人手指定
@@ -528,10 +550,11 @@ def save_note_12d(
     else:
         fname = f"{t}_{today}.md"
     path = USER_THESES_DIR / fname
+    path = _unique_note_path(path)
 
     # 至少要填一个维度或有 comment
     if not filled_dims(payload) and not user_comment.strip():
-        raise ValueError("空 note：12 维度全空且无 comment")
+        raise ValueError("空 note：15 维全空且无 comment")
 
     md = render_markdown(
         ticker=t,
@@ -542,12 +565,25 @@ def save_note_12d(
         user_comment=user_comment,
         source_doc=source_doc,
         raw_path=raw_path,
+        raw_text_path=raw_text_path,
+        source_hash=source_hash,
         source=source,
         weight=weight,
         confidence=confidence,
     )
     path.write_text(md, encoding="utf-8")
     return path
+
+
+def _unique_note_path(path: Path) -> Path:
+    """避免同一标的同一天多份报告互相覆盖。"""
+    if not path.exists():
+        return path
+    for i in range(2, 1000):
+        cand = path.with_name(f"{path.stem}_{i}{path.suffix}")
+        if not cand.exists():
+            return cand
+    raise RuntimeError(f"note 文件名冲突太多: {path}")
 
 
 def append_to_today_note(ticker: str, raw_text: str = "", user_comment: str = "") -> Optional[Path]:

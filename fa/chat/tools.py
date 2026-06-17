@@ -76,7 +76,7 @@ def _do_add_note(args: dict, state: dict) -> str:
             from ..note_extractor import extract_12d
             from ..note_template import filled_dims
             from ..ingest import save_note_12d
-            from ..ingest.user_note import archive_note_raw
+            from ..ingest.user_note import archive_note_raw, archive_note_text
             from ..sectors import classify_doc, display_sector
             doc = ingest_file(p)
             cls = classify_doc(doc["filename"], doc["text"], user_comment=comment)
@@ -92,12 +92,19 @@ def _do_add_note(args: dict, state: dict) -> str:
                 return "⚠ 15 维全空（文档信息不足或抽取失败，可换角度重试或检查文档）"
             # 归档原文（note 专属目录），供回溯 + 重抽
             raw_rel = ""
+            raw_text_rel = ""
             try:
                 raw_rel = archive_note_raw(p, doc["hash"])
             except Exception as e:
                 print(f"     ⚠ 原文归档失败（不影响 note）: {e}")
+            try:
+                raw_text_rel = archive_note_text(doc["text"], doc["hash"], doc["filename"])
+            except Exception as e:
+                print(f"     ⚠ 抽文归档失败（不影响 note）: {e}")
             note_path = save_note_12d(ticker=ticker, payload=payload, sector=sid, tags=tags,
-                                      user_comment=comment, source_doc=doc["filename"], raw_path=raw_rel)
+                                      user_comment=comment, source_doc=doc["filename"],
+                                      raw_path=raw_rel, raw_text_path=raw_text_rel,
+                                      source_hash=doc["hash"])
             state["last_ticker"] = ticker
             if sid:
                 state["last_sector"] = sid
@@ -162,6 +169,34 @@ def _do_list_notes(args: dict, state: dict) -> str:
     if len(notes) > 10:
         lines.append(f"\n... 还有 {len(notes) - 10} 条")
     return "\n".join(lines)
+
+
+def _do_list_announcements(args: dict, state: dict) -> str:
+    """查询 A 股公告。"""
+    from ..tools.announcements import query_announcements
+
+    ticker = _resolve_ticker(args.get("ticker"), state)
+    if not ticker:
+        return "错误：找不到 ticker。请先用 find_ticker 解析公司名，或直接给标准 A 股 ticker。"
+    focus = (args.get("focus") or "").strip()
+    if focus in {"治理", "减持", "增持", "governance"}:
+        focus = "governance"
+    elif focus in {"基本面", "业绩", "订单", "fundamental"}:
+        focus = "fundamental"
+    try:
+        out = query_announcements(
+            ticker,
+            start=args.get("start") or "2025-01-01",
+            end=args.get("end") or "2099-12-31",
+            keyword=args.get("keyword") or "",
+            focus=focus,
+            limit=int(args.get("limit") or 20),
+            show_text=bool(args.get("show_text")),
+        )
+    except Exception as e:
+        return f"公告查询失败：{e}"
+    state["last_ticker"] = ticker
+    return out
 
 
 def _do_ingest_doc(args: dict, state: dict) -> str:
@@ -305,7 +340,7 @@ def _do_ingest_doc(args: dict, state: dict) -> str:
     if ch.get("suggested_tags"):
         print(f"           ⚠ 链级疑似新主题未归类: {ch['suggested_tags']} — 未自动建 tag")
 
-    # ── [4/6] 判断是否个股深度研究 + 抽 12 维度 note ──
+    # ── [4/6] 判断是否个股深度研究 + 抽 15 维 note ──
     print(f"     [4/6] 判断是否个股深度研究...")
     from ..note_extractor import is_individual_research, extract_12d
     from ..ingest import save_note_12d, inherit_sector_tags
@@ -338,13 +373,13 @@ def _do_ingest_doc(args: dict, state: dict) -> str:
         print(f"           ✓ 非个股研究 ({check.get('reasoning', '')[:60]})，跳过 note")
 
     if should_extract and note_ticker:
-        print(f"     [5/6] 抽 12 维度 note...")
+        print(f"     [5/6] 抽 15 维 note...")
         note_payload = extract_12d(note_ticker, doc["text"], comment)
         filled = filled_dims(note_payload)
         if filled:
-            print(f"           ✓ 填了 {len(filled)}/12 维度: {', '.join(filled[:6])}{'...' if len(filled) > 6 else ''}")
+            print(f"           ✓ 填了 {len(filled)}/15 维: {', '.join(filled[:6])}{'...' if len(filled) > 6 else ''}")
         else:
-            print(f"           ⚠ 12 维度全空（可能 LLM 抽取失败或文档信息不足）")
+            print(f"           ⚠ 15 维全空（可能 LLM 抽取失败或文档信息不足）")
             note_payload = None
     else:
         print(f"     [5/6] 跳过 note 抽取")
@@ -357,6 +392,27 @@ def _do_ingest_doc(args: dict, state: dict) -> str:
     rel = str(cot_path.relative_to(cot_path.parents[3]))
     print(f"           ✓ CoT → {cot_path.name}")
 
+    cot_raw_rel = ""
+    note_raw_rel = ""
+    raw_text_rel = ""
+    try:
+        from ..ingest.base import archive_raw
+        cot_raw_rel = archive_raw(doc["path"], doc["hash"])
+        print(f"           ✓ CoT 原文归档 → {cot_raw_rel}")
+    except Exception as e:
+        print(f"           ⚠ 原文归档失败（不影响 CoT）: {e}")
+    try:
+        from ..ingest.user_note import archive_note_raw
+        note_raw_rel = archive_note_raw(doc["path"], doc["hash"])
+        print(f"           ✓ note 原文归档 → {note_raw_rel}")
+    except Exception as e:
+        print(f"           ⚠ note 原文归档失败（不影响 note）: {e}")
+    try:
+        from ..ingest.user_note import archive_note_text
+        raw_text_rel = archive_note_text(doc["text"], doc["hash"], doc["filename"])
+    except Exception as e:
+        print(f"           ⚠ note 抽文归档失败（不影响 note）: {e}")
+
     if note_payload and note_ticker:
         try:
             note_path = save_note_12d(
@@ -366,6 +422,9 @@ def _do_ingest_doc(args: dict, state: dict) -> str:
                 tags=tags,
                 user_comment=comment,
                 source_doc=doc["filename"],
+                raw_path=note_raw_rel,
+                raw_text_path=raw_text_rel,
+                source_hash=doc["hash"],
                 source="llm_ingest",
             )
             print(f"           ✓ note → {note_path.name}")
@@ -377,7 +436,7 @@ def _do_ingest_doc(args: dict, state: dict) -> str:
         source_path=doc["path"], filename=doc["filename"],
         file_type=doc["ext"], file_hash=doc["hash"],
         ticker=ticker, sector=sector_id, pages=doc["pages"],
-        cot_count=len(cots), cot_file=rel,
+        cot_count=len(cots), cot_file=rel, raw_path=cot_raw_rel,
     )
     print(f"           ✓ 摄入记录入库")
 
@@ -393,7 +452,7 @@ def _do_ingest_doc(args: dict, state: dict) -> str:
     # 输出总结
     summary_lines = [
         f"\n✓ 完成。{len(cots)} 条 CoT 已入库" +
-        (f" + 12 维度 note ({len(filled_dims(note_payload))}/12 维度)" if note_payload else ""),
+        (f" + 15 维 note ({len(filled_dims(note_payload))}/15 维)" if note_payload else ""),
         f"  主板块: {display_sector(sector_id)}",
         f"  tags:   {tags if tags else '(无)'}",
         f"  ticker: {note_ticker or ticker or '(未绑定)'}",
@@ -616,14 +675,14 @@ TOOLS_SPEC = [
     },
     {
         "name": "add_note",
-        "description": "录入用户对某只股票的投资笔记。三种用法（互斥优先级 file > message > 仅 comment）：1) message: 一句话快录，LLM 自动拆 4 维度。2) file_path: 上传外部研报 PDF/PPT/DOCX/MD，LLM 围绕 comment 角度拆 4 维度。3) 只给 comment 也行，作为主观锚点入库。ticker 若不给则用最近 ticker。",
+        "description": "录入用户对某只股票的投资笔记。三种用法（互斥优先级 file > message > 仅 comment）：1) message: 一句话快录，LLM 自动拆 4 维度。2) file_path: 上传外部研报 PDF/PPT/DOCX，LLM 抽 canonical_15d_v1 稀疏 note，并归档原文/抽文。3) 只给 comment 也行，作为主观锚点入库。ticker 若不给则用最近 ticker。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "ticker": {"type": "string", "description": "股票代码 (可选，默认用最近 ticker)。可以是标准 ticker 或公司名"},
                 "message": {"type": "string", "description": "一句话快录"},
                 "file_path": {"type": "string", "description": "外部文件路径，绝对路径或 ~ 开头"},
-                "comment": {"type": "string", "description": "一句话评论/角度提示，LLM 拆 4 维度时优先围绕这个角度"},
+                "comment": {"type": "string", "description": "一句话评论/角度提示，LLM 抽 note 时优先围绕这个角度"},
                 "sector": {"type": "string", "description": "所属板块 (可选)"}
             },
             "required": []
@@ -636,6 +695,25 @@ TOOLS_SPEC = [
             "type": "object",
             "properties": {
                 "ticker": {"type": "string", "description": "股票代码 (可选)"}
+            },
+            "required": []
+        },
+    },
+    {
+        "name": "list_announcements",
+        "description": ("查询 A 股公告正文/链接。用户问最近公告、业绩预告、订单/项目/产能/并购，"
+                        "或公司治理、减持、增持、回购、质押、董监高变动、关联交易、处罚诉讼时调用。"
+                        "当前只支持 A 股 Wind DB 公告，不支持港股/美股公告。"),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "A 股股票代码或公司名，可选，默认最近 ticker"},
+                "start": {"type": "string", "description": "开始日期 YYYY-MM-DD，默认 2025-01-01"},
+                "end": {"type": "string", "description": "结束日期 YYYY-MM-DD，默认远期"},
+                "keyword": {"type": "string", "description": "标题/正文关键词，如 减持、增持、订单、业绩预告"},
+                "focus": {"type": "string", "enum": ["", "governance", "fundamental"], "description": "governance=治理/减持增持/质押/处罚等；fundamental=业绩/订单/产能/并购等"},
+                "limit": {"type": "integer", "description": "最多返回条数，默认 20"},
+                "show_text": {"type": "boolean", "description": "是否展示正文摘录。用户要看原文细节/具体内容时设 true，否则 false"}
             },
             "required": []
         },
@@ -761,7 +839,7 @@ TOOLS_SPEC = [
     },
     {
         "name": "get_note",
-        "description": ("返回某 ticker 的用户笔记全文（12 维度/核心论点）。用户问『我对 X 的看法/论点是什么』时用。"
+        "description": ("返回某 ticker 的用户笔记全文（canonical_15d_v1/核心论点）。用户问『我对 X 的看法/论点是什么』时用。"
                         "同一公司可能有多条不同日期的笔记（观点会随时间变）：默认给最新一条；"
                         "用户说『看历史/之前怎么写的/观点怎么变的』传 all=true；要某天那条传 date。"),
         "input_schema": {
@@ -1172,6 +1250,7 @@ HANDLERS: dict[str, Callable[[dict, dict], str]] = {
     "find_ticker": _do_find_ticker,
     "add_note": _do_add_note,
     "list_notes": _do_list_notes,
+    "list_announcements": _do_list_announcements,
     "ingest_doc": _do_ingest_doc,
     "import_files": _do_import_files,
     "deep_analyze": _do_deep,

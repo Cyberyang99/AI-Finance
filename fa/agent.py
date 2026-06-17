@@ -427,7 +427,7 @@ def _run_agent(system: str, user_prompt: str, mode_desc: str) -> str:
     """运行 agent 循环。
 
     返回值：累积所有轮次的 assistant text（不只是最后一轮）。
-    deep 模式下用这个完整文本喂给 extract_12d 抽 12 维度 deep note。
+    deep 模式下用这个完整文本喂给 extract_12d 抽 canonical_15d_v1 deep note。
     """
     cfg = load_config()
     agent_cfg = cfg.get("agent", {})
@@ -566,14 +566,14 @@ Ticker: {ticker}
         except Exception as e:
             print(f"  [RECALL] 召回记录写入跳过: {e}")
 
-    # ── 后置：把 agent 输出的完整分析过一遍 LLM，抽 12 维度 deep note ──
-    print(f"\n\n[DEEP→12d] 抽取 12 维度 deep note...")
+    # ── 后置：把 agent 输出的完整分析过一遍 LLM，抽 15 维 deep note ──
+    print(f"\n\n[DEEP→15d] 抽取 15 维 deep note...")
     try:
         from .note_extractor import extract_12d
         from .ingest.user_note import save_note_12d, inherit_sector_tags
         from .note_template import filled_dims, JSON_DIM_IDS, is_filled
 
-        # 把基本面数据也拼进 raw_text 供 12d 抽取（agent 输出可能没覆盖财务细节）
+        # 把基本面数据也拼进 raw_text 供 15d 抽取（agent 输出可能没覆盖财务细节）
         raw_text = (
             full_text
             + "\n\n## 附：基本面数据（结构化）\n```json\n"
@@ -583,7 +583,7 @@ Ticker: {ticker}
         payload = extract_12d(ticker, raw_text, user_comment="agent 自动 deep 分析")
         filled = filled_dims(payload)
         json_filled = [k for k in JSON_DIM_IDS if is_filled(payload.get(k))]
-        print(f"  ✓ 填了 {len(filled)}/12 维度，量化字段 {json_filled}")
+        print(f"  ✓ 填了 {len(filled)}/15 维度，量化字段 {json_filled}")
 
         # 继承 sector/tags (从 CoT 库)，没有就用 fetch 的 sector
         inherited_sector, inherited_tags = inherit_sector_tags(ticker)
@@ -595,14 +595,14 @@ Ticker: {ticker}
                 ticker=ticker, payload=payload,
                 sector=final_sector, tags=final_tags,
                 source="llm_deep",
-                user_comment="agent fa deep 跑出的自动分析（结构化 12 维度版）",
+                user_comment="agent fa deep 跑出的自动分析（结构化 15 维版）",
                 filename_suffix="deep",
             )
             print(f"  ✓ 已保存 deep note → {path.name}")
         else:
-            print(f"  ⚠ 12 维度全空，跳过保存")
+            print(f"  ⚠ 15 维全空，跳过保存")
     except Exception as e:
-        print(f"  [DEEP→12d] 12 维度抽取失败（不影响 agent 主流程）: {e}")
+        print(f"  [DEEP→15d] 15 维抽取失败（不影响 agent 主流程）: {e}")
 
 
 def _recall_for_deep(ticker: str, data: dict) -> list:

@@ -8,7 +8,7 @@ L3 情景记忆: 通过 memory/store.py 的 Theses/Reviews 管理。
   - 一个框架 = 一个 md 文件，frontmatter(name/title/description/applies/avoid) + 正文
   - 文件人写人改、可持续外挂：新增框架 = 扔一个 md 进目录，代码零改动
   - 路由的「闭合词表」就是注册表本身：LLM 只能从已存在的框架里选，
-    选不出回退通用 12+3 维模板（general）
+    选不出回退通用 15 维模板（general）
   - `_` 开头的文件跳过（草稿/停用约定）
 """
 

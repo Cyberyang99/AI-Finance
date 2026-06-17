@@ -1,4 +1,4 @@
-"""review_v2 — 基于 12d note frontmatter 的结构化复盘。
+"""review_v2 — 基于 canonical note frontmatter 的结构化复盘。
 
 入口: fa review2 <ticker>
 
@@ -26,11 +26,12 @@ from .tools.data import fetch_fundamentals, fetch_price_at
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 1. 读取 12d note
+# 1. 读取 canonical note
 # ──────────────────────────────────────────────────────────────────────
 
 NOTES_DIR = Path("memory/theses/user")
 REVIEWS_DIR = Path("memory/reviews")
+SUPPORTED_NOTE_SCHEMAS = {"canonical_15d_v1", "12d_v1"}
 
 
 def _split_frontmatter(text: str) -> tuple[dict, str]:
@@ -48,7 +49,7 @@ def _split_frontmatter(text: str) -> tuple[dict, str]:
 
 
 def load_12d_note(ticker: str, notes_dir: Path = NOTES_DIR) -> Optional[dict]:
-    """找该 ticker 最新的 12d_v1 note，返回 frontmatter dict + 路径。
+    """找该 ticker 最新的 canonical note，返回 frontmatter dict + 路径。
 
     返回结构:
       {"path": Path, "fm": {...}, "body": str}
@@ -64,7 +65,8 @@ def load_12d_note(ticker: str, notes_dir: Path = NOTES_DIR) -> Optional[dict]:
         except Exception:
             continue
         fm, body = _split_frontmatter(text)
-        if fm.get("template_version") != "12d_v1":
+        schema = fm.get("note_schema") or fm.get("template_version")
+        if schema not in SUPPORTED_NOTE_SCHEMAS:
             continue
         if str(fm.get("ticker", "")).upper().strip() != t:
             continue
@@ -432,7 +434,7 @@ _SECTION_HEADERS = {
 
 
 def extract_section(body: str, key: str) -> str:
-    """从 12d note body 抽出指定 section 的纯文本（不含标题、不含后续 section）。"""
+    """从 canonical note body 抽出指定 section 的纯文本（不含标题、不含后续 section）。"""
     header = _SECTION_HEADERS.get(key)
     if not header:
         return ""
@@ -707,7 +709,7 @@ def do_review_v2(ticker: str, *, skip_llm: bool = False) -> Optional[Path]:
     ticker = ticker.upper().strip()
     note = load_12d_note(ticker)
     if not note:
-        print(f"[REVIEW2] {ticker} 无 12d_v1 模板的 note。请先 fa note -f 升级。")
+        print(f"[REVIEW2] {ticker} 无 canonical_15d_v1/12d_v1 模板的 note。请先 fa note -f。")
         return None
     fm = note["fm"]
     print(f"[REVIEW2] 源 note: {note['path'].name} (创建于 {fm.get('created_at')})")

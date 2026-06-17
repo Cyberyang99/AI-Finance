@@ -196,6 +196,10 @@ SYNTH_TEMPLATE = """## 目标股票基本面
 {idea}
 
 ## 用户对该公司已有的 note（自己的既有观点，按日期新→旧；勿当同业对比）
+### 公司级综合稿（如有，优先参考）
+{company_synthesis}
+
+### report-level notes（证据切片，按日期新→旧）
 {own_notes}
 （注：最新一条 = 用户「当前观点」；若多条且立场有变化，在结论里点出「观点演变」。）
 
@@ -271,6 +275,30 @@ def _fmt_notes(notes: list, idx: list, max_chars: int = 1200) -> str:
     return "\n".join(out) or "（无相关同业 note）"
 
 
+def _fmt_company_synthesis(ticker: str, max_chars: int = 7000) -> str:
+    """读取 company-level synthesis + conflicts，作为目标公司的优先背景。"""
+    try:
+        from .consolidate import load_company_synthesis, load_company_conflicts
+    except Exception:
+        return "（无）"
+    synth = load_company_synthesis(ticker)
+    if not synth:
+        return "（无）"
+    body = synth["content"].strip()
+    if len(body) > max_chars:
+        body = body[:max_chars] + "\n\n_(company synthesis 过长，已截断)_"
+    lines = [f"【company synthesis: {synth['path'].name}】", body]
+    conflicts = load_company_conflicts(ticker)
+    if conflicts and conflicts.get("items"):
+        lines.append("\n【conflicts / obsolete】")
+        for item in conflicts["items"][:12]:
+            if item.get("type") == "obsolete":
+                lines.append(f"- obsolete | {item.get('source', '')}: {item.get('claim', '')} ({item.get('reason', '')})")
+            else:
+                lines.append(f"- {item.get('dimension', '?')} | {item.get('topic', '')}: {item.get('handling', '')}")
+    return "\n".join(lines)
+
+
 def vet_stock(ticker: str, idea: str = "", cot_limit: int = 15, note_limit: int = 5,
               save: bool = True, with_todo: bool = True) -> dict:
     """主入口。返回 {ticker, markdown, path, recall_reasoning, n_cots, n_notes}。
@@ -303,10 +331,13 @@ def vet_stock(ticker: str, idea: str = "", cot_limit: int = 15, note_limit: int 
 
     cots_block = _fmt_cots(cots, cot_idx)
     notes_block = _fmt_notes(peer_notes, peer_idx)
-    own_block = _fmt_notes(own_notes, range(len(own_notes))) if own_notes else "（无）"
+    company_synthesis = _fmt_company_synthesis(ticker)
+    own_context_notes = own_notes[:5] if company_synthesis != "（无）" else own_notes
+    own_block = _fmt_notes(own_context_notes, range(len(own_context_notes))) if own_context_notes else "（无）"
     msg = SYNTH_TEMPLATE.format(
         ticker=ticker, snapshot=snapshot,
         idea=idea_text or "（无，做产业逻辑命中扫描）",
+        company_synthesis=company_synthesis,
         own_notes=own_block,
         cots=cots_block,
         notes=notes_block,

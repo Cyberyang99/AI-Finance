@@ -68,8 +68,8 @@ def main():
     pe = sub.add_parser("evolve", help="进化分析")
     pe.add_argument("--apply", type=int, help="执行指定编号的框架更新建议")
 
-    # review2 (12d 结构化复盘)
-    pr2 = sub.add_parser("review2", help="基于 12d note frontmatter 的结构化复盘 (单股)")
+    # review2 (canonical note 结构化复盘)
+    pr2 = sub.add_parser("review2", help="基于 canonical_15d_v1 note frontmatter 的结构化复盘 (单股)")
     pr2.add_argument("ticker", help="股票代码")
     pr2.add_argument("--no-llm", action="store_true", help="跳过 LLM 归因（省 API 费）")
 
@@ -112,9 +112,9 @@ def main():
     pi.add_argument("--cot-max", type=int, help="最多多少条 CoT")
 
     # note (P0)
-    pn = sub.add_parser("note", help="录入用户论点 (4 维度: 论点/护城河/反证/时间+仓位)")
+    pn = sub.add_parser("note", help="录入用户论点 / 个股报告 note (canonical_15d_v1，稀疏 15 维)")
     pn.add_argument("ticker", help="股票代码")
-    pn.add_argument("-m", "--message", help="一句话快录 (默认 LLM 自动拆 4 维度)")
+    pn.add_argument("-m", "--message", help="一句话快录（短文本直接进 core_thesis）")
     pn.add_argument("-f", "--file", help="从文件导入 (支持 md/txt 或 pdf/pptx/docx/xlsx)")
     pn.add_argument("-c", "--comment", help="一句话评论/角度提示 (上传外部研报时主观加权)")
     pn.add_argument("--sector", help="所属板块（可选，辅助召回过滤）")
@@ -123,7 +123,7 @@ def main():
     pn.add_argument("--edit", action="store_true",
                     help="打开 $EDITOR 编辑该 ticker 最新一条笔记")
     pn.add_argument("--append", action="store_true",
-                    help="同日 note 已存在时追加到末尾而非覆盖（不重抽 12 维度，原文 + comment 直接附加）")
+                    help="同日 note 已存在时追加到末尾而非覆盖（不重抽 15 维，原文 + comment 直接附加）")
     pn.add_argument("--reextract", action="store_true",
                     help="对已有 raw_path 的 note，用最新 15 维提取器从归档原文重抽（模板升级后用）")
 
@@ -134,6 +134,24 @@ def main():
                      help="给存量 note 补 sector+tags（与 CoT 同分类，支持同业横向召回）")
     pln.add_argument("--force", action="store_true", help="配合 --retag：连已有标签也重打")
     pln.add_argument("--full", action="store_true", help="显示笔记全文（建议配合 ticker，看某票全部历史笔记）")
+
+    # consolidate - 多报告 note → 公司综合稿
+    pcon = sub.add_parser("consolidate", help="同一公司多份 report-level note → company-level synthesis + 冲突清单")
+    pcon.add_argument("ticker", help="股票代码")
+    pcon.add_argument("--max-notes", type=int, default=12, help="最多取最新多少份 report-level note")
+    pcon.add_argument("--no-save", action="store_true", help="只打印不落盘")
+    pcon.add_argument("--dry-run", action="store_true", help="只列出将参与综合的 note，不调用 LLM")
+
+    # ann - Wind DB A股公告
+    pann = sub.add_parser("ann", help="A股公告查询：基本面/治理公告，Wind DB 正文/PDF链接")
+    pann.add_argument("ticker", help="股票代码，如 300750.SHE / 600519.SHG")
+    pann.add_argument("--start", default="2025-01-01", help="开始日期 YYYY-MM-DD")
+    pann.add_argument("--end", default="2099-12-31", help="结束日期 YYYY-MM-DD")
+    pann.add_argument("--keyword", "-k", default="", help="标题/正文关键词")
+    pann.add_argument("--focus", choices=["governance", "fundamental"], default="",
+                      help="关注类型：governance=减持增持/治理/质押/处罚等；fundamental=业绩/订单/产能/并购等")
+    pann.add_argument("--limit", "-l", type=int, default=20)
+    pann.add_argument("--show-text", action="store_true", help="显示公告正文摘录（默认只列标题+链接）")
 
     # cot (P2) — CoT 选股工具
     pcot = sub.add_parser("cot", help="CoT 工具：list / score / vote")
@@ -205,12 +223,12 @@ def main():
     pvet.add_argument("--no-save", action="store_true", help="只打印不落盘")
 
     # report - 个股研究笔记（vet + 框架路由 → Word）
-    prep = sub.add_parser("report", help="个股研究笔记：vet 校验 + 框架路由(12+3维保底) → Word")
+    prep = sub.add_parser("report", help="个股研究笔记：vet 校验 + 框架路由(canonical 15维保底) → Word")
     prep.add_argument("tickers", nargs="*", help="一个或少量标的，如 2513.HK 2015.HK")
     prep.add_argument("-i", "--idea", default="",
                       help="你的投资想法：内联文本，或 word/pdf/pptx/txt/md 文件路径(可选)")
     prep.add_argument("--framework", default="",
-                      help="强制指定框架 name（general=通用 12+3 维模板），跳过路由")
+                      help="强制指定框架 name（general=通用 15 维模板），跳过路由")
     prep.add_argument("--list", action="store_true", help="列出已注册的分析框架")
     prep.add_argument("--cot-limit", type=int, default=15, help="召回 CoT 上限")
     prep.add_argument("--note-limit", type=int, default=5, help="召回同业 note 上限")
@@ -266,6 +284,10 @@ def main():
         _cmd_note(args)
     elif args.cmd == "notes":
         _cmd_notes(args)
+    elif args.cmd == "consolidate":
+        _cmd_consolidate(args)
+    elif args.cmd == "ann":
+        _cmd_ann(args)
     elif args.cmd == "cot":
         _cmd_cot(args)
     elif args.cmd == "vet":
@@ -796,12 +818,12 @@ def _ingest_one(fpath, ticker, sector, with_cot=True, force=False, user_comment=
 
 
 def _cmd_note(args):
-    """用户论点录入 — 统一走 12 维度模板.
+    """用户论点录入 — 统一走 canonical_15d_v1 模板.
 
     输入方式：
       -m "一句话"               → 短文本，存到 core_thesis
-      -f <md/txt>               → 文本文件，LLM 抽 12 维度
-      -f <pdf/pptx/docx/xlsx>   → 文档抽文 + LLM 抽 12 维度
+      -f <md/txt>               → 文本文件，LLM 抽 15 维
+      -f <pdf/pptx/docx/xlsx>   → 文档抽文 + LLM 抽 15 维
       (无 -m 无 -f)             → 交互式 prompt 一句话
 
     --edit            打开 $EDITOR 编辑该 ticker 最新笔记
@@ -832,11 +854,16 @@ def _cmd_note(args):
             return
         n = notes[0]  # 最新一条
         raw_fp = (NOTE_RAW_DIR.parent / n["raw_path"]).resolve()
-        if not raw_fp.exists():
+        raw_text_fp = (NOTE_RAW_DIR.parent / n.get("raw_text_path", "")).resolve() if n.get("raw_text_path") else None
+        if raw_fp.exists():
+            print(f"[NOTE] 从归档原文重抽 15 维: {raw_fp.name}")
+            doc = ingest_file(raw_fp)
+        elif raw_text_fp and raw_text_fp.exists():
+            print(f"[NOTE] 归档原文不在，改用归档文本重抽 15 维: {raw_text_fp.name}")
+            doc = {"text": raw_text_fp.read_text(encoding="utf-8", errors="ignore"), "hash": n.get("source_hash", "")}
+        else:
             print(f"[NOTE] 归档原文不在: {raw_fp}")
             return
-        print(f"[NOTE] 从归档原文重抽 15 维: {raw_fp.name}")
-        doc = ingest_file(raw_fp)
         payload = extract_12d(ticker, doc["text"], (args.comment or "").strip())
         filled = filled_dims(payload)
         if not filled:
@@ -845,7 +872,9 @@ def _cmd_note(args):
         path = save_note_12d(
             ticker=ticker, payload=payload, sector=n.get("sector") or None,
             tags=n.get("tags") or [], source_doc=n.get("source_doc", ""),
-            raw_path=n["raw_path"], source="user_doc",
+            raw_path=n["raw_path"], raw_text_path=n.get("raw_text_path", ""),
+            source_hash=n.get("source_hash", "") or doc.get("hash", ""),
+            source="user_doc", filename_suffix="reextract",
         )
         print(f"[NOTE] ✓ 重抽完成，填 {len(filled)}/15 维 → {path.name}")
         return
@@ -859,6 +888,8 @@ def _cmd_note(args):
     source_doc = ""
     source = "user"
     raw_rel = ""   # 原文归档相对路径（仅文档来源）
+    raw_text_rel = ""  # 抽文文本归档相对路径
+    source_hash = ""
 
     if args.file:
         p = Path(args.file).expanduser().resolve()
@@ -875,6 +906,13 @@ def _cmd_note(args):
             print(f"[NOTE] 文本文件: {p.name} ({len(raw_text)} 字)")
             source_doc = p.name
             source = "user_file"
+            try:
+                from .ingest.base import file_hash
+                source_hash = file_hash(p)
+                from .ingest.user_note import archive_note_text
+                raw_text_rel = archive_note_text(raw_text, source_hash, p.name)
+            except Exception as e:
+                print(f"[NOTE] ⚠ 文本归档失败（不影响 note）: {e}")
         elif ext in SUPPORTED_EXT:
             print(f"[NOTE] 抽文中: {p.name}")
             try:
@@ -885,13 +923,20 @@ def _cmd_note(args):
             raw_text = doc["text"]
             source_doc = doc["filename"]
             source = "user_doc"
+            source_hash = doc["hash"]
             print(f"[NOTE] 抽文成功: {len(raw_text)} 字 / {doc['pages']} 页")
-            from .ingest.user_note import archive_note_raw
+            from .ingest.user_note import archive_note_raw, archive_note_text
             try:
                 raw_rel = archive_note_raw(p, doc["hash"])
                 print(f"[NOTE] ✓ 原文归档 → {raw_rel}")
             except Exception as e:
                 print(f"[NOTE] ⚠ 原文归档失败（不影响 note）: {e}")
+            try:
+                raw_text_rel = archive_note_text(raw_text, doc["hash"], doc["filename"])
+                if raw_text_rel:
+                    print(f"[NOTE] ✓ 抽文归档 → {raw_text_rel}")
+            except Exception as e:
+                print(f"[NOTE] ⚠ 抽文归档失败（不影响 note）: {e}")
         else:
             print(f"[NOTE] 不支持的文件类型: {ext}")
             return
@@ -908,7 +953,7 @@ def _cmd_note(args):
             print("[NOTE] 取消")
             return
 
-    # 1.5) --append 模式：当日有 note 就直接追加文本，不重抽 12 维度
+    # 1.5) --append 模式：当日有 note 就直接追加文本，不重抽 15 维
     if append_mode:
         from .ingest import append_to_today_note
         appended = append_to_today_note(ticker, raw_text=raw_text, user_comment=user_comment)
@@ -918,15 +963,15 @@ def _cmd_note(args):
         else:
             print(f"[NOTE] --append 指定但当日无 note，回退到正常新建流程")
 
-    # 2) 抽 12 维度
+    # 2) 抽 15 维
     payload = empty_payload()
     short_text = len(raw_text) < 300
     if use_llm and raw_text and not short_text:
-        print(f"[NOTE] LLM 抽 12 维度{'（围绕评论角度）' if user_comment else ''}...")
+        print(f"[NOTE] LLM 抽 15 维{'（围绕评论角度）' if user_comment else ''}...")
         payload = extract_12d(ticker, raw_text, user_comment)
         filled = filled_dims(payload)
         if filled:
-            print(f"[NOTE] LLM 填了 {len(filled)}/12: {', '.join(filled[:6])}{'...' if len(filled) > 6 else ''}")
+            print(f"[NOTE] LLM 填了 {len(filled)}/15: {', '.join(filled[:6])}{'...' if len(filled) > 6 else ''}")
         else:
             print(f"[NOTE] LLM 没抽出维度（资料过简或 LLM 抽风）")
 
@@ -944,7 +989,7 @@ def _cmd_note(args):
 
     # 4) 保存
     if not filled_dims(payload) and not user_comment:
-        print("[NOTE] 12 维度全空且无 comment，已取消")
+        print("[NOTE] 15 维全空且无 comment，已取消")
         return
 
     try:
@@ -956,6 +1001,8 @@ def _cmd_note(args):
             user_comment=user_comment,
             source_doc=source_doc,
             raw_path=raw_rel,
+            raw_text_path=raw_text_rel,
+            source_hash=source_hash,
             source=source,
         )
         print(f"[NOTE] ✓ 已保存 → {path}")
@@ -1017,6 +1064,64 @@ def _cmd_notes(args):
                 if line.strip():
                     print(f"  {line[:100]}")
         print()
+
+
+def _cmd_consolidate(args):
+    """多份 report-level notes → company synthesis，不改底层 notes。"""
+    from .consolidate import build_company_synthesis, load_report_notes
+
+    ticker = args.ticker.upper().strip()
+    notes = load_report_notes(ticker, max_notes=args.max_notes)
+    if not notes:
+        print(f"[CONSOLIDATE] {ticker} 没有 report-level notes")
+        return
+
+    print(f"[CONSOLIDATE] {ticker} 将综合 {len(notes)} 份 note:")
+    for n in notes:
+        src = n.get("source_doc") or n["path"].name
+        print(f"  - {n['created_at']} | {n['path'].name} | {src}")
+    if getattr(args, "dry_run", False):
+        print("[CONSOLIDATE] dry-run 完成，未调用 LLM")
+        return
+
+    result = build_company_synthesis(
+        ticker,
+        max_notes=args.max_notes,
+        save=not getattr(args, "no_save", False),
+    )
+    if result.get("error"):
+        print(f"[CONSOLIDATE] ✗ {result['error']}")
+        return
+    if getattr(args, "no_save", False):
+        print(result["markdown"])
+        if result.get("conflicts"):
+            print("\n[CONFLICTS]")
+            for c in result["conflicts"]:
+                print(f"- {c.get('dimension', '?')} | {c.get('topic', '')}: {c.get('handling', '')}")
+        return
+    print(f"[CONSOLIDATE] ✓ 综合稿 → {result['path']}")
+    print(f"[CONSOLIDATE] ✓ 冲突/过时清单 → {result['conflict_path']}")
+    print(f"[CONSOLIDATE] conflicts={len(result.get('conflicts') or [])}, obsolete={len(result.get('obsolete') or [])}")
+
+
+def _cmd_ann(args):
+    """A股公告查询。"""
+    from .tools.announcements import query_announcements
+
+    try:
+        out = query_announcements(
+            args.ticker,
+            start=args.start,
+            end=args.end,
+            keyword=args.keyword,
+            focus=args.focus,
+            limit=args.limit,
+            show_text=getattr(args, "show_text", False),
+        )
+    except Exception as e:
+        print(f"[ANN] ✗ {e}")
+        return
+    print(out)
 
 
 def _cmd_cot(args):
@@ -1525,7 +1630,7 @@ def _cmd_vet(args):
 
 
 def _cmd_report(args):
-    """个股研究笔记：vet + 框架路由(或 12+3 维保底) → Word。"""
+    """个股研究笔记：vet + 框架路由(或 canonical 15 维保底) → Word。"""
     if args.list:
         from .framework import list_analysis_frameworks
 
@@ -1534,7 +1639,7 @@ def _cmd_report(args):
         for f in fws:
             print(f"  · {f['name']} — {f['title']}")
             print(f"    适用: {f['applies'][:60]}")
-        print("  · general — 通用 12+3 维研究模板（note_template 同源，路由不中时的保底）")
+        print("  · general — 通用 15 维研究模板（note_template 同源，路由不中时的保底）")
         return
 
     if not args.tickers:

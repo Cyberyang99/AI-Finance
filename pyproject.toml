@@ -16,6 +16,7 @@ dependencies = [
     "eodhd>=1.0",
     "akshare>=1.14",
     "certifi>=2024",
+    "PyMySQL>=1.2",
 ]
 
 [project.scripts]

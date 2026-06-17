@@ -20,12 +20,18 @@ fa import "D:\今日研报" --sector "AI"            # 整个目录
 
 ### 想到一个观点
 ```bash
-# 单行快录（LLM 自动拆 4 维度）
+# 单行快录（短文本直接进 core_thesis）
 fa note 2513.HK -m "智谱的护城河是 B 端政企关系，不是模型。算力降本后会同质化"
 
-# 长一点写成文件
+# 个股报告/长文档：抽 canonical_15d_v1 稀疏 note，并归档原文 + 抽文文本
 fa note 2513.HK -f my-thesis.md
+fa note 2513.HK -f ~/Desktop/某券商深度.pdf -c "重点看现金流和估值假设"
+
+# 模板升级或抽取器改进后，从归档原文重抽最新 note
+fa note 2513.HK --reextract
 ```
+
+note 是 report-level evidence slice：一份报告一份 note，不自动合并、不覆盖旧 note。15 个维度允许缺失；报告没写就留空，不为了填满而编。
 
 文件命名约定（用 `fa import` 时会自动识别 ticker）：
 - `2513.HK_xxx.md` ← 文件名前缀
@@ -72,17 +78,62 @@ fa vet --batch 名单.txt                    # 每行一个标的，后面可跟
 - 批量是轻量版：每股 1 次 LLM 调用，CoT 目录放 prompt 前缀吃 DeepSeek 自动缓存
 - 清单里无后缀的输入（公司名/裸代码）走模糊解析，慢且可能错，建议给标准 ticker
 
+### 同一家公司有多份报告，想生成当前综合观点
+```bash
+fa consolidate 2513.HK               # 多份 report-level notes → company synthesis + conflicts jsonl
+fa consolidate 2513.HK --dry-run     # 只看会综合哪些 note，不调用 LLM
+fa consolidate 2513.HK --no-save     # 打印综合稿，不落盘
+```
+
+- 底层 note 保留在 `memory/theses/user/`，不自动删除/覆盖。
+- 综合稿写到 `memory/theses/company/`，冲突/过时信息写到 `memory/theses/conflicts/`。
+- 盈利预测、估值、风险若冲突，保留分歧和来源，不直接平均。
+- `fa vet` 会优先读取 company synthesis；若有 synthesis，只补最近 5 份 report-level notes，避免多报告重复刷屏。
+- `fa chat` 启动时会自动检查最近 30 天新增/更新且 note>=2 的标的，最多自动综合 3 个；可用 `FA_CHAT_AUTO_CONSOLIDATE=0` 关闭。
+
+### 批量下载研报并投喂 FA
+```bash
+python3 ~/.claude/skills/research-ingest/scripts/research_ingest.py \
+  --stock 600519,300750 \
+  --start 2026-01-01 \
+  --limit 5 \
+  --comment "批量研报入库"
+
+python3 ~/.claude/skills/research-ingest/scripts/research_ingest.py \
+  --report-type industry \
+  --keyword 光模块 \
+  --start 2026-01-01 \
+  --limit 10 \
+  --sector "AI 互联"
+```
+
+- 个股报告：下载 PDF → `fa note -f` → 自动 `fa consolidate`。
+- 行业/策略/宏观：下载 PDF → `fa ingest` 抽 CoT。
+- Wind DB 个股研报没有 PDF/URL 字段，且 `content` 通常为空；这种情况下脚本会导出 DB 摘要 Markdown，状态标为 `text_from_db_abstract`，不要当原文研报使用。
+- 每次输出 `manifest.jsonl` 和 `run_summary.json` 到桌面时间戳目录。
+
+### 想查公司公告（治理/基本面变化）
+```bash
+fa ann 300750.SHE --focus governance --start 2026-01-01   # 减持/增持/回购/质押/治理/处罚等
+fa ann 300750.SHE --focus fundamental --limit 10          # 业绩/订单/产能/并购/重大项目等
+fa ann 300750.SHE --keyword 减持 --show-text              # 查关键词并显示正文摘录
+```
+
+- 公告来自 Wind DB `financedata.ashareanninf`，有 Wind 链接；部分公告有 HTML 化正文，正文为空时 `--show-text` 会尝试下载 PDF 链接并抽前几页文本。
+- 当前只支持 A 股公告；港股/美股公告仍需外部源。
+- `fa chat` 中直接问“某公司最近有没有减持/增持/治理公告/业绩预告/订单变化”，会调用公告工具查询。
+
 ### 想出一份完整研究笔记（report，Word 输出）
 ```bash
 fa report 2513.HK                          # vet 校验 + 自动路由框架 → report_<ticker>_<date>.docx
 fa report 2513.HK -i "我的逻辑..."          # 带自己的想法
 fa report GEV.US --framework leopold-bottleneck   # 强制指定框架，跳过路由
-fa report 2513.HK --framework general      # 强制用通用 12+3 维模板
+fa report 2513.HK --framework general      # 强制用通用 15 维材料/估值模板
 fa report --list                           # 看已注册的分析框架
 ```
 
 - 笔记 = 第一部分逻辑校验（vet）+ 第二部分框架分析，落盘桌面 .docx
-- 路由只能选 `memory/framework/frameworks/` 里已存在的框架，把握不大自动回退通用 12+3 维模板
+- 路由只能选 `memory/framework/frameworks/` 里已存在的框架，把握不大自动回退通用 15 维模板
 - **加新框架 = 直接放一个 md 进 frameworks/**（frontmatter 写 name/title/description/applies/avoid），代码零改动；`_` 开头的文件视为草稿不参与路由
 - 框架要求但库内没有的数据（期权链/做空比例/机构持仓等）会标「待人工补查」并在文末汇总，不会编数字
 

@@ -1,10 +1,10 @@
-"""个股投资逻辑笔记模板 — 12 维度通用版.
+"""个股投资逻辑笔记模板 — canonical_15d_v1 通用版.
 
 设计原则：
-  1. 通用：12 维度跨行业都能填（制造/消费/医药/金融/TMT）
+  1. 通用：15 个稀疏维度跨行业都能填（制造/消费/医药/金融/TMT）
   2. 不强制：任何维度都允许留空；行业不适用的直接跳过
   3. 量化字段结构化：forecast / valuation / catalysts 都用 JSON 块，便于 review 机器解析
-  4. note 和 deep 共用此模板
+  4. note 是 report-level evidence slice：一份报告一份 note，不承担最终综合观点
 
 行业特化（后续可扩展）：
   - 制造业（参考豪迈）：business_breakdown 强调收入拆分 + 下游景气
@@ -20,7 +20,11 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-# ── 12 维度定义 ──
+SCHEMA_VERSION = "canonical_15d_v1"
+LEGACY_SCHEMA_VERSION = "12d_v1"
+
+
+# ── 15 维度定义 ──
 # is_json=True 的字段在 frontmatter 里是 yaml block，body 里渲染为 ```json fence
 DIMENSIONS: list[dict] = [
     {"id": "core_thesis",           "name": "核心论点",          "is_json": False, "weight": 10,
@@ -140,6 +144,8 @@ def render_markdown(
     user_comment: str = "",
     source_doc: str = "",
     raw_path: str = "",
+    raw_text_path: str = "",
+    source_hash: str = "",
     source: str = "user",
     weight: float = 2.0,
     confidence: str = "high",
@@ -148,6 +154,7 @@ def render_markdown(
 
     JSON 字段同时写到 frontmatter（机器可读）和 body（人可读）。
     raw_path: 原始文件归档相对路径（相对 theses/user/），供回溯/重抽。
+    raw_text_path: 抽文后的纯文本归档路径（相对 theses/user/），用于快速审计。
     """
     tags_list = [t.strip() for t in (tags or []) if t and t.strip()]
     fm_lines = [
@@ -162,15 +169,20 @@ def render_markdown(
     ])
     if source_doc:
         fm_lines.append(f"source_doc: {source_doc}")
+    if source_hash:
+        fm_lines.append(f"source_hash: {source_hash}")
     if raw_path:
         fm_lines.append(f"raw_path: {raw_path}")
+    if raw_text_path:
+        fm_lines.append(f"raw_text_path: {raw_text_path}")
     if user_comment:
         fm_lines.append(f"user_comment: {user_comment.strip().replace(chr(10), ' ')}")
     fm_lines.extend([
         f"created_at: {created_at}",
         f"weight: {weight}",
         f"confidence: {confidence}",
-        f"template_version: 12d_v1",
+        f"template_version: {SCHEMA_VERSION}",
+        f"note_schema: {SCHEMA_VERSION}",
     ])
 
     # JSON 字段拍平进 frontmatter (yaml inline)，便于 review 机器解析
@@ -199,7 +211,7 @@ def render_markdown(
         ])
 
     filled = filled_dims(payload)
-    body_lines.append(f"**已填维度**: {len(filled)} / 12")
+    body_lines.append(f"**已填维度**: {len(filled)} / {len(DIMENSIONS)}")
     if filled:
         body_lines.append(f"  → {', '.join(filled)}")
     body_lines.append("")
@@ -222,7 +234,7 @@ def render_markdown(
 # ── 从 frontmatter 反向解析 ──
 
 def parse_frontmatter(text: str) -> dict:
-    """从一份 12 维度 note 文件读 frontmatter，返回 dict（JSON 字段已反序列化）。"""
+    """从一份 canonical note 文件读 frontmatter，返回 dict（JSON 字段已反序列化）。"""
     import yaml as _yaml
     if not text.startswith("---"):
         return {}
